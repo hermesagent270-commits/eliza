@@ -23,6 +23,7 @@ import {
   type AgentSandboxBackupMetadata,
   type AgentSandboxStatus,
   agentSandboxesRepository,
+  PRE_DELETE_BACKUP_RETENTION_MS,
   prepareAgentBackupInsertData,
 } from "../../db/repositories/agent-sandboxes";
 import { userCharactersRepository } from "../../db/repositories/characters";
@@ -1938,7 +1939,7 @@ export class ElizaSandboxService {
     // its bridge intact, the capture happens before any teardown, and a
     // refusal leaves a recoverable tombstone the next attempt retries.
     let captureUnsupported = false;
-    let captureAlreadyPersisted = false;
+    let preDeleteBackupId: string | null = null;
     let preDeleteSnapshot: {
       stateData: AgentBackupStateData;
       sizeBytes: number;
@@ -1975,7 +1976,7 @@ export class ElizaSandboxService {
         snapshotSource.deletion_started_at !== null &&
         priorBackup.created_at >= snapshotSource.deletion_started_at
       ) {
-        captureAlreadyPersisted = true;
+        preDeleteBackupId = priorBackup.id;
       } else {
         try {
           preDeleteSnapshot = await this.fetchSnapshotState(snapshotSource);
@@ -2027,7 +2028,7 @@ export class ElizaSandboxService {
     const precheck = await this.prepareAgentDelete(agentId, orgId, options.authorization, {
       snapshot: preDeleteSnapshot,
       captureUnsupported,
-      alreadyPersisted: captureAlreadyPersisted,
+      existingBackupId: preDeleteBackupId,
     });
 
     if (!precheck.ok) {
@@ -2267,7 +2268,7 @@ export class ElizaSandboxService {
         bridgeUrl: string;
       } | null;
       captureUnsupported: boolean;
-      alreadyPersisted?: boolean;
+      existingBackupId?: string | null;
     },
   ): Promise<
     | {
@@ -2279,6 +2280,7 @@ export class ElizaSandboxService {
         environmentRevision: number;
         lifecycleRevision: number;
         deletionAttemptId: string;
+        preDeleteBackupId: string | null;
       }
     | { ok: false; error: string }
   > {
@@ -2318,10 +2320,11 @@ export class ElizaSandboxService {
           error: "Agent is running; suspend it before deletion",
         };
       }
+      let preDeleteBackupId = preDeleteCapture?.existingBackupId ?? null;
       if (
         this.requiresPreDeleteCapture(rec) &&
         !preDeleteCapture?.captureUnsupported &&
-        !preDeleteCapture?.alreadyPersisted
+        preDeleteBackupId === null
       ) {
         const snapshot = preDeleteCapture?.snapshot ?? null;
         // The capture must be OF THIS generation (shutdown's rule): a capture
@@ -2336,7 +2339,7 @@ export class ElizaSandboxService {
               "Refusing to delete: the agent's lifecycle generation moved after the pre-deletion capture; retry the delete.",
           };
         }
-        await this.persistSnapshotWithinTransaction(
+        preDeleteBackupId = await this.persistSnapshotWithinTransaction(
           tx,
           rec.id,
           rec.organization_id,
@@ -2395,6 +2398,7 @@ export class ElizaSandboxService {
         environmentRevision: rec.environment_revision,
         lifecycleRevision: owned.lifecycleRevision,
         deletionAttemptId: owned.deletionAttemptId,
+        preDeleteBackupId,
       };
     });
   }
@@ -2412,6 +2416,7 @@ export class ElizaSandboxService {
       environmentRevision: number;
       lifecycleRevision: number;
       deletionAttemptId: string;
+      preDeleteBackupId: string | null;
     },
   ): Promise<DeleteAgentResult> {
     return dbWrite.transaction(async (tx) => {
@@ -2441,6 +2446,28 @@ export class ElizaSandboxService {
         } as const;
       }
 
+      if (ownership.preDeleteBackupId) {
+        const retained = await agentSandboxesRepository.retainPreDeleteBackupForDeletedAgent(tx, {
+          backupId: ownership.preDeleteBackupId,
+          sandboxRecordId: agentId,
+          organizationId: orgId,
+          deletionAttemptId: ownership.deletionAttemptId,
+          expiresAt: new Date(Date.now() + PRE_DELETE_BACKUP_RETENTION_MS),
+        });
+        if (!retained) {
+          throw new ElizaError("Pre-delete recovery backup ownership changed", {
+            code: "PRE_DELETE_BACKUP_RETENTION_LOST",
+            context: {
+              agentId,
+              organizationId: orgId,
+              deletionAttemptId: ownership.deletionAttemptId,
+              backupId: ownership.preDeleteBackupId,
+            },
+            severity: "fatal",
+          });
+        }
+      }
+
       const [deletedSandbox] = await tx
         .delete(agentSandboxes)
         .where(
@@ -2456,9 +2483,17 @@ export class ElizaSandboxService {
         )
         .returning();
 
-      return deletedSandbox
-        ? ({ success: true, rowDeleted: true, deletedSandbox } as const)
-        : ({ success: false, error: "Agent not found" } as const);
+      if (!deletedSandbox) {
+        // Throwing rolls back the recovery detachment above; returning a
+        // structured miss would commit an orphaned backup while retaining the
+        // agent row, making the next retry unable to find its capture.
+        throw new ElizaError("Agent row delete lost its lifecycle ownership", {
+          code: "AGENT_DELETE_COMMIT_LOST",
+          context: { agentId, organizationId: orgId, ...ownership },
+          severity: "ephemeral",
+        });
+      }
+      return { success: true, rowDeleted: true, deletedSandbox } as const;
     });
   }
 
@@ -10371,7 +10406,7 @@ export class ElizaSandboxService {
     type: AgentBackupSnapshotType,
     stateData: AgentBackupStateData,
     sizeBytes: number,
-  ): Promise<void> {
+  ): Promise<string> {
     const [backup] = await tx
       .insert(agentSandboxBackups)
       .values(
@@ -10400,6 +10435,14 @@ export class ElizaSandboxService {
       type,
       bytes: backup?.size_bytes ?? sizeBytes,
     });
+    if (!backup) {
+      throw new ElizaError("Backup insert did not return the persisted row", {
+        code: "AGENT_BACKUP_INSERT_MISSING",
+        context: { sandboxRecordId, organizationId, snapshotType: type },
+        severity: "fatal",
+      });
+    }
+    return backup.id;
   }
 
   /**
