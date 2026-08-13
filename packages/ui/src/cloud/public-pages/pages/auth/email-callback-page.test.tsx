@@ -24,6 +24,12 @@ const callbackState = vi.hoisted(() => ({
       ) => Promise<{ token: string; refreshToken?: string }>
     >(),
   pendingReturnTo: null as string | null,
+  resend: vi.fn(),
+  publishComplete: vi.fn(),
+}));
+
+const sessionSpies = vi.hoisted(() => ({
+  sync: vi.fn(),
 }));
 
 // Stub StewardAuthProvider with a marker that ALSO supplies the Steward context
@@ -63,7 +69,20 @@ vi.mock("../../../shell/CloudI18nProvider", () => ({
 }));
 vi.mock("../../lib/use-page-title", () => ({ usePageTitle: () => {} }));
 vi.mock("../../lib/steward-session", () => ({
-  syncStewardSessionCookie: vi.fn(),
+  syncStewardSessionCookie: sessionSpies.sync,
+}));
+vi.mock("../../lib/steward-email-login", () => ({
+  startStewardEmailLogin: callbackState.resend,
+}));
+vi.mock("../../lib/steward-email-login-complete", () => ({
+  publishStewardEmailLoginComplete: callbackState.publishComplete,
+}));
+vi.mock("../../../shell/steward-config", () => ({
+  configuredStewardTenantId: () => "elizacloud",
+  DEFAULT_STEWARD_TENANT_ID: "elizacloud",
+}));
+vi.mock("../../../shell/steward-url", () => ({
+  resolveBrowserStewardApiUrl: () => "https://api.example.test/steward",
 }));
 vi.mock("../../lib/login-return-to", () => ({
   defaultLoginReturnTo: () => "/join",
@@ -89,6 +108,15 @@ import EmailCallbackPage, {
 
 beforeEach(() => {
   callbackState.verifyEmailCallback.mockReset();
+  callbackState.resend.mockReset();
+  callbackState.resend.mockResolvedValue({
+    expiresAt: Date.now() + 600_000,
+    challengeId: "fresh-challenge",
+    pollSecret: "fresh-secret",
+  });
+  callbackState.publishComplete.mockReset();
+  sessionSpies.sync.mockReset();
+  sessionSpies.sync.mockResolvedValue(undefined);
   callbackState.pendingReturnTo = null;
 });
 
@@ -186,6 +214,12 @@ describe("EmailCallbackPage", () => {
       ).toBeTruthy(),
     );
     expect(screen.queryByText("Invalid or expired magic link")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Resend sign-in email" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "Back to login" }).getAttribute("href"),
+    ).toBe("/login");
 
     firstMount.unmount();
     render(
@@ -200,6 +234,80 @@ describe("EmailCallbackPage", () => {
     await waitFor(() =>
       expect(callbackState.verifyEmailCallback).toHaveBeenCalledTimes(2),
     );
+  });
+
+  it("resends an expired callback as a fresh challenge and shows the cooldown", async () => {
+    const user = userEvent.setup();
+    callbackState.verifyEmailCallback.mockRejectedValue(
+      new StewardApiError("expired", 410),
+    );
+
+    render(
+      <MemoryRouter
+        initialEntries={[
+          "/auth/callback/email?token=expired-token&email=person%40example.com",
+        ]}
+      >
+        <EmailCallbackPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Resend sign-in email" }),
+    );
+
+    await waitFor(() =>
+      expect(callbackState.resend).toHaveBeenCalledWith(
+        {
+          baseUrl: "https://api.example.test/steward",
+          tenantId: "elizacloud",
+        },
+        "person@example.com",
+      ),
+    );
+    expect(
+      await screen.findByText("A new sign-in email is on its way."),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("button", { name: /Resend in 30s/ })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
+  it("publishes a token-free completion only after the shared cookie is synced", async () => {
+    callbackState.pendingReturnTo = "/get-started";
+    callbackState.verifyEmailCallback.mockResolvedValue({
+      token: "private-session-token",
+      refreshToken: "private-refresh-token",
+    });
+
+    render(
+      <MemoryRouter
+        initialEntries={[
+          "/auth/callback/email?token=one-time-token&email=person%40example.com",
+        ]}
+      >
+        <EmailCallbackPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(callbackState.publishComplete).toHaveBeenCalledWith(
+        "person@example.com",
+        "/get-started",
+      ),
+    );
+    expect(sessionSpies.sync).toHaveBeenCalledWith(
+      "private-session-token",
+      "private-refresh-token",
+    );
+    expect(sessionSpies.sync.mock.invocationCallOrder[0]).toBeLessThan(
+      callbackState.publishComplete.mock.invocationCallOrder[0],
+    );
+    expect(
+      JSON.stringify(callbackState.publishComplete.mock.calls),
+    ).not.toContain("private-session-token");
   });
 
   it("restores a pending messaging continuation after magic-link verification", async () => {
@@ -232,8 +340,14 @@ describe("EmailCallbackPage", () => {
     expect(
       screen.getByRole("heading", { level: 1, name: "Sign-in failed" }),
     ).toBeTruthy();
-    const recovery = screen.getByRole("link", { name: "Sign In Again" });
+    const resend = screen.getByRole("link", {
+      name: "Resend sign-in email",
+    });
+    const recovery = screen.getByRole("link", { name: "Back to login" });
+    expect(resend.getAttribute("href")).toBe("/login");
     expect(recovery.getAttribute("href")).toBe("/login");
+    await user.tab();
+    expect(document.activeElement).toBe(resend);
     await user.tab();
     expect(document.activeElement).toBe(recovery);
     expect(callbackState.verifyEmailCallback).not.toHaveBeenCalled();

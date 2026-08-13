@@ -64,6 +64,7 @@ import {
   startStewardEmailLogin,
   verifyStewardEmailSignInCode,
 } from "../../lib/steward-email-login";
+import { subscribeStewardEmailLoginComplete } from "../../lib/steward-email-login-complete";
 import {
   buildStewardOAuthAuthorizeUrl,
   buildStewardOAuthRedirectUri,
@@ -108,7 +109,13 @@ const PLAYWRIGHT_TEST_AUTH_ENABLED =
   (typeof process !== "undefined" &&
     process.env?.NEXT_PUBLIC_PLAYWRIGHT_TEST_AUTH === "true");
 
-type AuthStep = "idle" | "loading" | "email-sent" | "otp-entry" | "success";
+type AuthStep =
+  | "idle"
+  | "loading"
+  | "email-sent"
+  | "otp-entry"
+  | "external-success"
+  | "success";
 type EmailCheckState =
   | "pending"
   | "approved"
@@ -357,6 +364,9 @@ export default function StewardLoginSection() {
   );
   const [callbackError, setCallbackError] = useState<string | null>(null);
   const [redirectTo, setRedirectTo] = useState<string | null>(null);
+  const [externalSuccessDestination, setExternalSuccessDestination] = useState<
+    string | null
+  >(null);
   // Detected once, synchronously, BEFORE the callback-consuming effect below
   // strips `?code`/`#token` from the URL. While this is true the section shows a
   // terminal "completing sign-in" state instead of re-rendering the provider
@@ -604,6 +614,16 @@ export default function StewardLoginSection() {
       if (timer) clearTimeout(timer);
     };
   }, [emailChallenge, emailCheckState, step, stewardApiUrl]);
+
+  useEffect(() => {
+    if (step !== "email-sent" || !email.trim()) return;
+    return subscribeStewardEmailLoginComplete(email, (message) => {
+      setExternalSuccessDestination(message.destination);
+      setEmailCheckState("approved");
+      setError(null);
+      setStep("external-success");
+    });
+  }, [email, step]);
 
   useEffect(() => {
     if (step !== "email-sent" || !emailChallenge) {
@@ -936,6 +956,43 @@ export default function StewardLoginSection() {
     );
   }
 
+  if (step === "external-success") {
+    return (
+      <ReservedLoginFrame>
+        <div
+          className="flex flex-col items-center gap-4 text-center"
+          role="status"
+        >
+          <div className="flex size-12 items-center justify-center rounded-full bg-accent-subtle text-accent">
+            <EmailIcon />
+          </div>
+          <p className="text-base font-semibold text-txt-strong">
+            {t("cloud.login.emailStatus.signedIn", {
+              defaultValue: "Signed in",
+            })}
+          </p>
+          <p className="text-sm text-muted">
+            {t("cloud.login.emailStatus.signedInElsewhere", {
+              defaultValue:
+                "Sign-in finished in another tab. You can continue here or close this tab.",
+            })}
+          </p>
+          <Button
+            type="button"
+            className="hosted-signin-focus-emphasis min-h-touch w-full rounded-md bg-accent px-4 py-3 font-semibold text-accent-foreground hover:bg-accent-hover"
+            onClick={() =>
+              setRedirectTo(
+                externalSuccessDestination ??
+                  resolveLoginReturnTo(searchParams),
+              )
+            }
+          >
+            {t("cloud.emailCallback.continue", { defaultValue: "Continue" })}
+          </Button>
+        </div>
+      </ReservedLoginFrame>
+    );
+  }
   if (step === "email-sent") {
     const hasCompanionCode = Boolean(
       emailChallenge?.challengeId && emailChallenge.pollSecret,

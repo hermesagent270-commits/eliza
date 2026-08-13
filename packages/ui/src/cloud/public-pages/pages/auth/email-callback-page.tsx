@@ -20,13 +20,24 @@ import {
   StewardAuthProvider,
 } from "../../../shell/StewardProvider";
 import {
+  configuredStewardTenantId,
+  DEFAULT_STEWARD_TENANT_ID,
+} from "../../../shell/steward-config";
+import { resolveBrowserStewardApiUrl } from "../../../shell/steward-url";
+import {
   consumePendingOAuthReturnTo,
   defaultLoginReturnTo,
 } from "../../lib/login-return-to";
+import { startStewardEmailLogin } from "../../lib/steward-email-login";
+import { publishStewardEmailLoginComplete } from "../../lib/steward-email-login-complete";
 import { syncStewardSessionCookie } from "../../lib/steward-session";
 import { usePageTitle } from "../../lib/use-page-title";
 
 type CallbackStatus = "verifying" | "success" | "error";
+type ResendStatus = "idle" | "sending" | "sent" | "error";
+
+const EMAIL_RESEND_COOLDOWN_MS = 30_000;
+const STEWARD_TENANT_ID = configuredStewardTenantId(DEFAULT_STEWARD_TENANT_ID);
 
 type EmailVerificationResult = {
   token: string;
@@ -112,6 +123,10 @@ function EmailCallbackContent() {
   const successDestinationRef = useRef<string | null>(null);
   const [status, setStatus] = useState<CallbackStatus>("verifying");
   const [error, setError] = useState<string | null>(null);
+  const [resendStatus, setResendStatus] = useState<ResendStatus>("idle");
+  const [resendError, setResendError] = useState<string | null>(null);
+  const [resendAvailableAt, setResendAvailableAt] = useState(0);
+  const [resendRemainingSeconds, setResendRemainingSeconds] = useState(0);
 
   usePageTitle(
     t("cloud.emailCallback.metaTitle", {
@@ -120,6 +135,19 @@ function EmailCallbackContent() {
   );
 
   const returnTo = useMemo(readStoredAppAuthorizeReturnTo, []);
+  const email = searchParams.get("email")?.trim() ?? "";
+
+  useEffect(() => {
+    if (resendAvailableAt === 0) return;
+    const update = () => {
+      setResendRemainingSeconds(
+        Math.ceil(Math.max(0, resendAvailableAt - Date.now()) / 1000),
+      );
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [resendAvailableAt]);
 
   useEffect(() => {
     if (attemptedRef.current) return;
@@ -144,6 +172,7 @@ function EmailCallbackContent() {
       );
       successDestinationRef.current = destination;
       clearStoredAppAuthorizeReturnTo();
+      if (email) publishStewardEmailLoginComplete(email, destination);
       setStatus("success");
       redirectTimer = setTimeout(() => {
         window.location.replace(destination);
@@ -158,8 +187,8 @@ function EmailCallbackContent() {
     }
 
     const token = searchParams.get("token");
-    const email = searchParams.get("email");
-    if (!token || !email) {
+    const callbackEmail = searchParams.get("email");
+    if (!token || !callbackEmail) {
       setStatus("error");
       setError(
         t("cloud.emailCallback.missingToken", {
@@ -179,7 +208,7 @@ function EmailCallbackContent() {
         const result = await verifyEmailCallbackSingleFlight(
           auth.verifyEmailCallback,
           token,
-          email,
+          callbackEmail,
         );
         await syncStewardSessionCookie(result.token, result.refreshToken);
         finishSuccess();
@@ -194,7 +223,33 @@ function EmailCallbackContent() {
     return () => {
       if (redirectTimer) clearTimeout(redirectTimer);
     };
-  }, [auth, returnTo, searchParams, t]);
+  }, [auth, email, returnTo, searchParams, t]);
+
+  async function handleResend() {
+    if (!email || resendStatus === "sending" || resendRemainingSeconds > 0) {
+      return;
+    }
+    setResendStatus("sending");
+    setResendError(null);
+    try {
+      await startStewardEmailLogin(
+        {
+          baseUrl: resolveBrowserStewardApiUrl(),
+          tenantId: STEWARD_TENANT_ID,
+        },
+        email,
+      );
+      setResendAvailableAt(Date.now() + EMAIL_RESEND_COOLDOWN_MS);
+      setResendStatus("sent");
+    } catch (resendFailure) {
+      setResendStatus("error");
+      setResendError(
+        resendFailure instanceof Error
+          ? resendFailure.message
+          : "Could not resend the sign-in email. Try again.",
+      );
+    }
+  }
 
   if (status === "error") {
     return (
@@ -208,10 +263,48 @@ function EmailCallbackContent() {
           })}
         </h1>
         <p className="max-w-xs text-center text-sm text-muted">{error}</p>
-        <Button asChild className="hosted-signin-focus-emphasis mt-2">
+        {resendStatus === "sent" && (
+          <p className="text-center text-sm text-muted" role="status">
+            {t("cloud.emailCallback.resent", {
+              defaultValue: "A new sign-in email is on its way.",
+            })}
+          </p>
+        )}
+        {resendError && (
+          <p className="text-center text-sm text-destructive" role="alert">
+            {resendError}
+          </p>
+        )}
+        {email ? (
+          <Button
+            className="hosted-signin-focus-emphasis mt-2"
+            type="button"
+            onClick={handleResend}
+            disabled={resendStatus === "sending" || resendRemainingSeconds > 0}
+          >
+            {resendStatus === "sending"
+              ? t("cloud.emailCallback.resending", {
+                  defaultValue: "Resending...",
+                })
+              : resendRemainingSeconds > 0
+                ? `Resend in ${resendRemainingSeconds}s`
+                : t("cloud.emailCallback.resend", {
+                    defaultValue: "Resend sign-in email",
+                  })}
+          </Button>
+        ) : (
+          <Button asChild className="hosted-signin-focus-emphasis mt-2">
+            <a href="/login">
+              {t("cloud.emailCallback.resend", {
+                defaultValue: "Resend sign-in email",
+              })}
+            </a>
+          </Button>
+        )}
+        <Button asChild variant="ghost">
           <a href="/login">
-            {t("cloud.cliLogin.signInAgain", {
-              defaultValue: "Sign In Again",
+            {t("cloud.login.backToLogin", {
+              defaultValue: "Back to login",
             })}
           </a>
         </Button>

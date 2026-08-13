@@ -28,6 +28,13 @@ const sessionSpies = vi.hoisted(() => ({
   sync: vi.fn(),
 }));
 
+const emailCompleteSpies = vi.hoisted(() => ({
+  listener: null as
+    | null
+    | ((message: { email: string; destination: string }) => void),
+  unsubscribe: vi.fn(),
+}));
+
 vi.mock("./passkey-capability", () => ({
   resolveWebPasskeyCapability: () =>
     Promise.resolve({ usable: false, reason: "native-without-bridge" }),
@@ -97,6 +104,18 @@ vi.mock("../../lib/steward-session", () => ({
   syncStewardSessionCookie: sessionSpies.sync,
 }));
 
+vi.mock("../../lib/steward-email-login-complete", () => ({
+  subscribeStewardEmailLoginComplete: vi.fn(
+    (
+      _email: string,
+      listener: (message: { email: string; destination: string }) => void,
+    ) => {
+      emailCompleteSpies.listener = listener;
+      return emailCompleteSpies.unsubscribe;
+    },
+  ),
+}));
+
 vi.mock("../../lib/login-return-to", () => ({
   resolveLoginReturnTo: () => "/cloud",
   consumePendingOAuthReturnTo: () => null,
@@ -134,6 +153,8 @@ describe("StewardLoginSection email magic-link companion code", () => {
     });
     emailLoginSpies.poll.mockResolvedValue("pending");
     sessionSpies.sync.mockResolvedValue(undefined);
+    emailCompleteSpies.listener = null;
+    emailCompleteSpies.unsubscribe.mockReset();
   });
 
   afterEach(() => {
@@ -184,6 +205,29 @@ describe("StewardLoginSection email magic-link companion code", () => {
         "The link was approved elsewhere. This device was not signed in.",
       ),
     ).toBeTruthy();
+    expect(sessionSpies.sync).not.toHaveBeenCalled();
+  });
+
+  it("dismisses the live waiting form when the callback succeeds in another tab", async () => {
+    renderSection();
+    await startEmailLogin();
+
+    expect(emailCompleteSpies.listener).not.toBeNull();
+    act(() => {
+      emailCompleteSpies.listener?.({
+        email: "person@example.com",
+        destination: "/get-started",
+      });
+    });
+
+    expect(await screen.findByText("Signed in")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Sign-in finished in another tab. You can continue here or close this tab.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Six-digit code")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Resend/i })).toBeNull();
     expect(sessionSpies.sync).not.toHaveBeenCalled();
   });
 
