@@ -65,8 +65,10 @@ mock.module("@/lib/services/ai-pricing-definitions", () => ({
   getSupportedVideoModelDefinition: (model: string) =>
     model === MODEL
       ? {
+          modelId: MODEL,
           provider: "fal",
           billingSource: "fal",
+          defaultParameters: { durationSeconds: 8, audio: true },
         }
       : undefined,
   SUPPORTED_VIDEO_MODEL_IDS: [MODEL],
