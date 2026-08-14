@@ -18,6 +18,10 @@ async function runEnsureAgentSandboxSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS "deletion_attempt_id" uuid,
       ADD COLUMN IF NOT EXISTS "deletion_started_at" timestamptz,
       ADD COLUMN IF NOT EXISTS "deletion_allocation_counted" boolean,
+      ADD COLUMN IF NOT EXISTS "pre_delete_capture_waiver_attempt_id" uuid,
+      ADD COLUMN IF NOT EXISTS "pre_delete_capture_waiver_environment_revision" integer,
+      ADD COLUMN IF NOT EXISTS "pre_delete_capture_waiver_sandbox_id" text,
+      ADD COLUMN IF NOT EXISTS "pre_delete_capture_waiver_bridge_url" text,
       ADD COLUMN IF NOT EXISTS "warm_claim_credential_state" text,
       ADD COLUMN IF NOT EXISTS "warm_claim_source_pool_id" uuid,
       ADD COLUMN IF NOT EXISTS "warm_claim_key_fingerprint" text,
@@ -37,6 +41,27 @@ async function runEnsureAgentSandboxSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS "replacement_cleanup_created_at" timestamptz,
       ADD COLUMN IF NOT EXISTS "previous_image_digest" text,
       ADD COLUMN IF NOT EXISTS "previous_docker_image" text
+  `);
+
+  await dbWrite.execute(sql`
+    DO $$ BEGIN
+      ALTER TABLE "agent_sandboxes"
+        ADD CONSTRAINT "agent_sandboxes_pre_delete_capture_waiver_shape_check"
+        CHECK ((
+          "pre_delete_capture_waiver_attempt_id" IS NULL
+          AND "pre_delete_capture_waiver_environment_revision" IS NULL
+          AND "pre_delete_capture_waiver_sandbox_id" IS NULL
+          AND "pre_delete_capture_waiver_bridge_url" IS NULL
+        ) OR (
+          "pre_delete_capture_waiver_attempt_id" IS NOT NULL
+          AND "pre_delete_capture_waiver_attempt_id" = "deletion_attempt_id"
+          AND "pre_delete_capture_waiver_environment_revision" = "environment_revision"
+          AND "pre_delete_capture_waiver_sandbox_id" IS NOT DISTINCT FROM "sandbox_id"
+          AND "pre_delete_capture_waiver_bridge_url" IS NOT NULL
+        ));
+    EXCEPTION
+      WHEN duplicate_object THEN null;
+    END $$;
   `);
 
   await dbWrite.execute(sql`
@@ -247,6 +272,8 @@ async function runEnsureAgentSandboxSchema(): Promise<void> {
         ) OR (
           "sandbox_record_id" IS NULL
           AND "snapshot_type" = 'pre-delete'
+          AND "backup_kind" = 'full'
+          AND "parent_backup_id" IS NULL
           AND "recovery_organization_id" IS NOT NULL
           AND "recovery_agent_id" IS NOT NULL
           AND "recovery_deletion_attempt_id" IS NOT NULL
