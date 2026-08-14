@@ -15,6 +15,7 @@ import {
   StewardSessionError,
 } from "@elizaos/shared/steward-session-client";
 import { dispatchStewardSessionChange } from "../../../events/steward-session-event";
+import { decodeJwtPayload } from "../../lib/jwt";
 import { ELIZA_CLOUD_DIRECT_API_BY_HOST } from "../../shell/steward-url";
 
 export function resolveStewardAuthEndpoint(
@@ -231,6 +232,78 @@ export async function refreshStewardSessionViaCookie(): Promise<{
     expiresIn?: number;
     token?: string;
   };
+}
+
+type RefreshedStewardSession = Awaited<
+  ReturnType<typeof refreshStewardSessionViaCookie>
+>;
+
+const EMAIL_SESSION_RECOVERY_INTERVAL_MS = 250;
+const EMAIL_SESSION_RECOVERY_TIMEOUT_MS = 10_000;
+
+function normalizedEmail(value: string | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized || null;
+}
+
+function waitForRecoveryDelay(
+  delayMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Recover the session established by a specific email challenge without ever
+ * clearing cookies. A stale marker, an expired refresh cookie, or another
+ * account's valid session is treated as "not ready" until the callback's
+ * server-verified token is returned and its email claim matches.
+ */
+export async function recoverStewardEmailSessionViaCookie(
+  expectedEmail: string,
+  options: {
+    signal?: AbortSignal;
+    intervalMs?: number;
+    timeoutMs?: number;
+  } = {},
+): Promise<RefreshedStewardSession | null> {
+  const expected = normalizedEmail(expectedEmail);
+  if (!expected) return null;
+
+  const intervalMs = options.intervalMs ?? EMAIL_SESSION_RECOVERY_INTERVAL_MS;
+  const deadline =
+    Date.now() + (options.timeoutMs ?? EMAIL_SESSION_RECOVERY_TIMEOUT_MS);
+
+  while (!options.signal?.aborted && Date.now() < deadline) {
+    try {
+      const session = await refreshStewardSessionViaCookie();
+      const claims = session.token ? decodeJwtPayload(session.token) : null;
+      if (normalizedEmail(claims?.email) === expected) return session;
+    } catch (error) {
+      if (!isRejectedCookieSession(error)) throw error;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    const shouldContinue = await waitForRecoveryDelay(
+      Math.min(intervalMs, remainingMs),
+      options.signal,
+    );
+    if (!shouldContinue) return null;
+  }
+
+  return null;
 }
 
 const DEAD_SESSION_RETRY_DELAY_MS = 100;

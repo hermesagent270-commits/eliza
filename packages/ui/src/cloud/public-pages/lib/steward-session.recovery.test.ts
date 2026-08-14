@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  recoverStewardEmailSessionViaCookie,
   recoverStewardSessionViaCookie,
   refreshStewardSessionViaCookie,
 } from "./steward-session";
@@ -18,6 +19,98 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+function tokenForEmail(email: string): string {
+  const payload = btoa(JSON.stringify({ email }))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+  return `header.${payload}.signature`;
+}
+
+describe("recoverStewardEmailSessionViaCookie", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.useRealTimers();
+  });
+
+  it("never deletes a stale marker session whose refresh cookie stays expired", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        jsonResponse(
+          { error: "Refresh token rejected", code: "invalid_token" },
+          401,
+        ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const recovery = recoverStewardEmailSessionViaCookie("person@example.com", {
+      intervalMs: 100,
+      timeoutMs: 250,
+    });
+    await vi.advanceTimersByTimeAsync(250);
+
+    await expect(recovery).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(
+      fetchMock.mock.calls.every(([, init]) => init?.method === "POST"),
+    ).toBe(true);
+  });
+
+  it("accepts the challenged account when its cookie arrives after two rejected refreshes", async () => {
+    vi.useFakeTimers();
+    const expectedToken = tokenForEmail("person@example.com");
+    const fetchMock = vi
+      .fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        jsonResponse({ ok: true, token: expectedToken }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { error: "Refresh token rejected", code: "invalid_token" },
+          401,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { error: "Refresh token rejected", code: "missing_token" },
+          401,
+        ),
+      );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const recovery = recoverStewardEmailSessionViaCookie("person@example.com", {
+      intervalMs: 100,
+      timeoutMs: 500,
+    });
+    await vi.advanceTimersByTimeAsync(200);
+
+    await expect(recovery).resolves.toEqual({ ok: true, token: expectedToken });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(
+      fetchMock.mock.calls.every(([, init]) => init?.method === "POST"),
+    ).toBe(true);
+  });
+
+  it("does not accept another account before the challenged session arrives", async () => {
+    vi.useFakeTimers();
+    const otherToken = tokenForEmail("other@example.com");
+    const expectedToken = tokenForEmail("person@example.com");
+    const fetchMock = vi
+      .fn(async () => jsonResponse({ ok: true, token: expectedToken }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, token: otherToken }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const recovery = recoverStewardEmailSessionViaCookie(
+      " PERSON@example.com ",
+      { intervalMs: 100, timeoutMs: 500 },
+    );
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(recovery).resolves.toEqual({ ok: true, token: expectedToken });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("recoverStewardSessionViaCookie", () => {
   afterEach(() => {

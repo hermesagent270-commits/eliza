@@ -23,7 +23,6 @@ const callbackState = vi.hoisted(() => ({
         email: string,
       ) => Promise<{ token: string; refreshToken?: string }>
     >(),
-  pendingReturnTo: null as string | null,
   resend: vi.fn(),
   publishComplete: vi.fn(),
   isAuthenticated: false,
@@ -85,14 +84,6 @@ vi.mock("../../../shell/steward-config", () => ({
 vi.mock("../../../shell/steward-url", () => ({
   resolveBrowserStewardApiUrl: () => "https://api.example.test/steward",
 }));
-vi.mock("../../lib/login-return-to", () => ({
-  defaultLoginReturnTo: () => "/join",
-  consumePendingOAuthReturnTo: () => {
-    const value = callbackState.pendingReturnTo;
-    callbackState.pendingReturnTo = null;
-    return value;
-  },
-}));
 vi.mock("../../../../cloud-ui/components/auth/authorize-return", () => ({
   readStoredAppAuthorizeReturnTo: () => null,
   clearStoredAppAuthorizeReturnTo: () => {},
@@ -103,6 +94,7 @@ vi.mock("../../../../cloud-ui/components/brand/brand-button", () => ({
   ),
 }));
 
+import { storePendingOAuthReturnTo } from "../../lib/login-return-to";
 import EmailCallbackPage, {
   resolveEmailCallbackDestination,
 } from "./email-callback-page";
@@ -119,7 +111,8 @@ beforeEach(() => {
   callbackState.isAuthenticated = false;
   sessionSpies.sync.mockReset();
   sessionSpies.sync.mockResolvedValue(undefined);
-  callbackState.pendingReturnTo = null;
+  window.sessionStorage.clear();
+  window.localStorage.clear();
 });
 
 afterEach(() => {
@@ -278,7 +271,9 @@ describe("EmailCallbackPage", () => {
   });
 
   it("publishes a token-free completion only after the shared cookie is synced", async () => {
-    callbackState.pendingReturnTo = "/get-started";
+    storePendingOAuthReturnTo(
+      new URLSearchParams({ returnTo: "/get-started" }),
+    );
     callbackState.verifyEmailCallback.mockResolvedValue({
       token: "private-session-token",
       refreshToken: "private-refresh-token",
@@ -310,6 +305,41 @@ describe("EmailCallbackPage", () => {
     expect(
       JSON.stringify(callbackState.publishComplete.mock.calls),
     ).not.toContain("private-session-token");
+  });
+
+  it("falls back safely when callback state contains a backslash authority", async () => {
+    const hostile = JSON.stringify({
+      returnTo: "/\\\\evil.example",
+      expiresAt: Date.now() + 60_000,
+    });
+    window.sessionStorage.setItem("eliza.login.oauth.returnTo", hostile);
+    window.localStorage.setItem("eliza.login.oauth.returnTo", hostile);
+    callbackState.verifyEmailCallback.mockResolvedValue({
+      token: "private-session-token",
+    });
+
+    render(
+      <MemoryRouter
+        initialEntries={[
+          "/auth/callback/email?token=one-time-token&email=person%40example.com",
+        ]}
+      >
+        <EmailCallbackPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(callbackState.publishComplete).toHaveBeenCalledWith(
+        "person@example.com",
+        "/join",
+      ),
+    );
+    expect(
+      window.sessionStorage.getItem("eliza.login.oauth.returnTo"),
+    ).toBeNull();
+    expect(
+      window.localStorage.getItem("eliza.login.oauth.returnTo"),
+    ).toBeNull();
   });
 
   it("rejects a replayed callback without broadcasting when this tab already has a session", async () => {

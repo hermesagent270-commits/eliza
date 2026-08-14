@@ -3,6 +3,8 @@
  * established the shared browser session in another tab.
  */
 
+import { sanitizeLoginReturnTo } from "./login-return-to";
+
 export const STEWARD_EMAIL_LOGIN_COMPLETE_MESSAGE_TYPE =
   "eliza-steward-email-login-complete";
 export const STEWARD_EMAIL_LOGIN_COMPLETE_CHANNEL =
@@ -16,25 +18,6 @@ export type StewardEmailLoginCompleteMessage = {
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
-}
-
-function isSafeDestination(destination: string): boolean {
-  if (
-    !destination.startsWith("/") ||
-    destination.startsWith("//") ||
-    destination.includes("\\") ||
-    typeof window === "undefined"
-  ) {
-    return false;
-  }
-
-  try {
-    const base = new URL(window.location.href);
-    const resolved = new URL(destination, base);
-    return resolved.origin === base.origin;
-  } catch {
-    return false;
-  }
 }
 
 export function isStewardEmailLoginCompleteMessage(
@@ -53,7 +36,7 @@ export function isStewardEmailLoginCompleteMessage(
   }
   if (
     typeof message.destination !== "string" ||
-    !isSafeDestination(message.destination.trim())
+    !sanitizeLoginReturnTo(message.destination.trim())
   ) {
     return false;
   }
@@ -71,7 +54,7 @@ export function publishStewardEmailLoginComplete(
   const trimmedDestination = destination.trim();
   if (
     !normalizedEmail ||
-    !isSafeDestination(trimmedDestination) ||
+    !sanitizeLoginReturnTo(trimmedDestination) ||
     typeof window === "undefined" ||
     typeof BroadcastChannel === "undefined"
   ) {
