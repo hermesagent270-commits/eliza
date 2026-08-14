@@ -278,6 +278,41 @@ function getCallbackReasonMessage(
 
 const EMAIL_RESEND_COOLDOWN_MS = 30_000;
 const EMAIL_STATUS_POLL_MS = 3_000;
+const SHARED_SESSION_RECOVERY_POLL_MS = 250;
+const SHARED_SESSION_RECOVERY_WINDOW_MS = 10_000;
+
+function waitForAbortableDelay(
+  delayMs: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function waitForSharedSessionCookie(
+  signal: AbortSignal,
+): Promise<boolean> {
+  const deadline = Date.now() + SHARED_SESSION_RECOVERY_WINDOW_MS;
+  while (!signal.aborted && Date.now() < deadline) {
+    if (hasStewardAuthedCookie()) return true;
+    const shouldContinue = await waitForAbortableDelay(
+      Math.min(SHARED_SESSION_RECOVERY_POLL_MS, deadline - Date.now()),
+      signal,
+    );
+    if (!shouldContinue) return false;
+  }
+  return !signal.aborted && hasStewardAuthedCookie();
+}
 
 function sanitizeOneTimeCode(value: string): string {
   return value.replace(/[^0-9]/g, "").slice(0, 6);
@@ -606,6 +641,7 @@ export default function StewardLoginSection() {
     const { challengeId, pollSecret } = emailChallenge;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    const recoveryAbortController = new AbortController();
 
     const poll = async () => {
       try {
@@ -617,6 +653,17 @@ export default function StewardLoginSection() {
         if (cancelled) return;
         const mapped = mapChallengeStatus(status);
         if (mapped === "approved") {
+          const cookieReady = await waitForSharedSessionCookie(
+            recoveryAbortController.signal,
+          );
+          if (cancelled) return;
+          if (!cookieReady) {
+            setEmailCheckState("approved");
+            setError(
+              "The link was used, but this tab could not restore the shared session. Continue in the tab that opened the link or request a fresh email.",
+            );
+            return;
+          }
           try {
             const recovered = await recoverSharedEmailSession();
             if (cancelled) return;
@@ -670,6 +717,7 @@ export default function StewardLoginSection() {
     timer = setTimeout(poll, EMAIL_STATUS_POLL_MS);
     return () => {
       cancelled = true;
+      recoveryAbortController.abort();
       if (timer) clearTimeout(timer);
     };
   }, [
@@ -684,8 +732,20 @@ export default function StewardLoginSection() {
   useEffect(() => {
     if (step !== "email-sent" || !email.trim()) return;
     let cancelled = false;
+    const recoveryAbortController = new AbortController();
     const unsubscribe = subscribeStewardEmailLoginComplete(email, (message) => {
       void (async () => {
+        const cookieReady = await waitForSharedSessionCookie(
+          recoveryAbortController.signal,
+        );
+        if (cancelled) return;
+        if (!cookieReady) {
+          setEmailCheckState("approved");
+          setError(
+            "Sign-in finished elsewhere, but this tab could not restore the shared session. Continue in the other tab or request a fresh email.",
+          );
+          return;
+        }
         try {
           const recovered = await recoverSharedEmailSession();
           if (cancelled) return;
@@ -721,6 +781,7 @@ export default function StewardLoginSection() {
     });
     return () => {
       cancelled = true;
+      recoveryAbortController.abort();
       unsubscribe();
     };
   }, [email, recoverSharedEmailSession, step]);

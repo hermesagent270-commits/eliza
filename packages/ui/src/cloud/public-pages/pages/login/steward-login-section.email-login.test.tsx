@@ -27,6 +27,7 @@ const emailLoginSpies = vi.hoisted(() => ({
 const sessionSpies = vi.hoisted(() => ({
   sync: vi.fn(),
   recover: vi.fn(),
+  hasAuthedCookie: vi.fn(),
 }));
 
 const emailCompleteSpies = vi.hoisted(() => ({
@@ -77,6 +78,13 @@ vi.mock("../../../shell/steward-config", () => ({
 vi.mock("../../../shell/CloudI18nProvider", () => ({
   useCloudT: () => (_key: string, opts?: { defaultValue?: string }) =>
     opts?.defaultValue ?? _key,
+}));
+
+vi.mock("@elizaos/shared/steward-session-client", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@elizaos/shared/steward-session-client")
+  >()),
+  hasStewardAuthedCookie: sessionSpies.hasAuthedCookie,
 }));
 
 vi.mock("../../lib/steward-email-login", () => ({
@@ -155,6 +163,7 @@ describe("StewardLoginSection email magic-link companion code", () => {
     emailLoginSpies.poll.mockResolvedValue("pending");
     sessionSpies.sync.mockResolvedValue(undefined);
     sessionSpies.recover.mockResolvedValue({ ok: true });
+    sessionSpies.hasAuthedCookie.mockReturnValue(false);
     emailCompleteSpies.listener = null;
     emailCompleteSpies.unsubscribe.mockReset();
   });
@@ -192,13 +201,25 @@ describe("StewardLoginSection email magic-link companion code", () => {
     );
   });
 
-  it("recovers the shared cookie session when polling observes a consumed link", async () => {
+  it("waits for the shared cookie before recovering a consumed link", async () => {
     emailLoginSpies.poll.mockResolvedValue("consumed");
+    sessionSpies.hasAuthedCookie.mockReturnValue(false);
     renderSection();
     await startEmailLogin();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3_000);
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(sessionSpies.recover).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Six-digit code")).toBeTruthy();
+
+    sessionSpies.hasAuthedCookie.mockReturnValue(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
     });
 
     expect(await screen.findByText("Signed in")).toBeTruthy();
@@ -212,14 +233,14 @@ describe("StewardLoginSection email magic-link companion code", () => {
     expect(screen.queryByLabelText("Six-digit code")).toBeNull();
   });
 
-  it("keeps resend recovery visible when a consumed link has no shared session", async () => {
+  it("bounds consumed-link cookie waiting and keeps resend recovery visible", async () => {
     emailLoginSpies.poll.mockResolvedValue("consumed");
-    sessionSpies.recover.mockResolvedValue(null);
+    sessionSpies.hasAuthedCookie.mockReturnValue(false);
     renderSection();
     await startEmailLogin();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_000);
+      await vi.advanceTimersByTimeAsync(13_000);
     });
 
     expect(await screen.findByText("Link approved")).toBeTruthy();
@@ -229,6 +250,7 @@ describe("StewardLoginSection email magic-link companion code", () => {
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: /Resend/i })).toBeTruthy();
+    expect(sessionSpies.recover).not.toHaveBeenCalled();
   });
 
   it("dismisses the live waiting form when the callback succeeds in another tab", async () => {
@@ -236,6 +258,7 @@ describe("StewardLoginSection email magic-link companion code", () => {
     await startEmailLogin();
 
     await waitFor(() => expect(emailCompleteSpies.listener).not.toBeNull());
+    sessionSpies.hasAuthedCookie.mockReturnValue(true);
     act(() => {
       emailCompleteSpies.listener?.({
         email: "person@example.com",
@@ -253,6 +276,33 @@ describe("StewardLoginSection email magic-link companion code", () => {
     expect(screen.queryByRole("button", { name: /Resend/i })).toBeNull();
     expect(sessionSpies.recover).toHaveBeenCalledOnce();
     expect(sessionSpies.sync).not.toHaveBeenCalled();
+  });
+
+  it("does not recover an advisory completion signal before its cookie is readable", async () => {
+    sessionSpies.hasAuthedCookie.mockReturnValue(false);
+    renderSection();
+    await startEmailLogin();
+
+    await waitFor(() => expect(emailCompleteSpies.listener).not.toBeNull());
+    act(() => {
+      emailCompleteSpies.listener?.({
+        email: "person@example.com",
+        destination: "/get-started",
+      });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(sessionSpies.recover).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Six-digit code")).toBeTruthy();
+
+    sessionSpies.hasAuthedCookie.mockReturnValue(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+
+    expect(await screen.findByText("Signed in")).toBeTruthy();
+    expect(sessionSpies.recover).toHaveBeenCalledOnce();
   });
 
   it("shows expired and replay guidance for a rejected code", async () => {
