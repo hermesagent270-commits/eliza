@@ -104,6 +104,10 @@ export interface FirstRunFinishPorts {
    * reuse narration; text-only consumers ignore it.
    */
   onStatus?: (text: string | null, code?: string) => void;
+  /** Fail closed when a deadline-abandoned caller resumes after login. */
+  assertActive?: () => void;
+  /** Login is settled; callers may cancel a login-only deadline. */
+  onCloudLoginSettled?: () => void;
 }
 
 type FirstRunRuntimeStateKey =
@@ -786,6 +790,7 @@ export async function listOrAutoProvisionCloudAgent(
   sourceDraft: FirstRunProfileDraft,
   ports: FirstRunFinishPorts,
 ): Promise<FirstRunFinishOutcome> {
+  ports.assertActive?.();
   syncIdentity(sourceDraft, ports);
   ports.setRuntimeState(
     "firstRunRuntimeTarget",
@@ -837,6 +842,8 @@ export async function listOrAutoProvisionCloudAgent(
     !getCloudAuthToken(client)
   ) {
     await ports.handleInteractiveCloudLogin({ requireClientAuth: true });
+    ports.onCloudLoginSettled?.();
+    ports.assertActive?.();
     // A landed bearer IS the proof every following step runs on — the old
     // post-login status re-probe's result was overridden by exactly this
     // token check, so the extra /api/v1/user round trip (~0.8s on staging)
@@ -859,10 +866,13 @@ export async function listOrAutoProvisionCloudAgent(
   if (!authToken) {
     return { kind: "needs-cloud-login" };
   }
+  ports.onCloudLoginSettled?.();
+  ports.assertActive?.();
   let list = agentsList;
   if (!list) {
     ports.onStatus?.("Finding your agents...", "listing");
     list = await listAgents();
+    ports.assertActive?.();
   }
   if (!list.success) {
     return {
@@ -875,6 +885,7 @@ export async function listOrAutoProvisionCloudAgent(
   const running = runningCloudAgents(list.data);
   const preferredAgentId = preferredRunningCloudAgentId(running);
   const agentId = preferredAgentId ?? running[0]?.agent_id ?? null;
+  ports.assertActive?.();
   return bindCloudAgent(
     sourceDraft,
     authToken,

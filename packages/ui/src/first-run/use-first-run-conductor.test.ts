@@ -131,8 +131,12 @@ import {
   ConversationMessagesCtx,
   type ConversationMessagesValue,
 } from "../state/ConversationMessagesContext.hooks";
-import { CLOUD_LOGIN_POPUP_NAME } from "../state/cloud-login-launch";
+import {
+  CLOUD_LOGIN_POPUP_NAME,
+  takeClaimedCloudLoginWindow,
+} from "../state/cloud-login-launch";
 import type { AppContextValue } from "../state/internal";
+import { CLOUD_LOGIN_WAIT_DEADLINE_MS } from "./cloud-login-wait-deadline";
 import { classifyDeviceRamTier } from "./device-ram-tier";
 import {
   tryHandleFirstRunAction,
@@ -300,6 +304,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
+  void takeClaimedCloudLoginWindow();
   __setAppValueForTests(null);
   resetTutorialState();
   ensureLocalStorage().clear();
@@ -1083,7 +1089,7 @@ describe("useFirstRunConductor", () => {
     );
     await waitFor(() => {
       expect(
-        transcript.current.some((message) =>
+        transcript.current.some((message: ConversationMessage) =>
           message.id.startsWith("first-run:error:"),
         ),
       ).toBe(true);
@@ -1761,6 +1767,240 @@ describe("cloud-only onboarding (runtime chooser off — the production default)
     unmount();
   });
 
+  it("blocks stale A before login when its pre-login status probe resolves after retry B", async () => {
+    vi.useFakeTimers();
+    localStorage.removeItem("steward_session_token");
+    let resolveStatusA: (status: { connected: boolean }) => void = () => {};
+    mocks.client.getCloudStatus
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ connected: boolean }>((resolve) => {
+            resolveStatusA = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ connected: false });
+    let resolveLoginB: () => void = () => {};
+    const handleInteractiveCloudLogin = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveLoginB = resolve;
+        }),
+    );
+    seedAppStore({
+      elizaCloudConnected: false,
+      handleInteractiveCloudLogin,
+    });
+    const popupA = { closed: false, close: vi.fn() } as unknown as Window;
+    const popupB = { closed: false, close: vi.fn() } as unknown as Window;
+    vi.mocked(window.open)
+      .mockReturnValueOnce(popupA)
+      .mockReturnValueOnce(popupB);
+    const { turn, unmount } = renderConductor();
+    await vi.waitFor(() => expect(turn("first-run:greeting")).toBeTruthy());
+
+    expect(tryHandleFirstRunAction("__first_run__:runtime:cloud")).toBe(true);
+    await vi.waitFor(() =>
+      expect(mocks.client.getCloudStatus).toHaveBeenCalledTimes(1),
+    );
+    await React.act(async () => {
+      await vi.advanceTimersByTimeAsync(CLOUD_LOGIN_WAIT_DEADLINE_MS);
+    });
+
+    expect(tryHandleFirstRunAction("__first_run__:runtime:cloud")).toBe(true);
+    await vi.waitFor(() =>
+      expect(handleInteractiveCloudLogin).toHaveBeenCalledTimes(1),
+    );
+    resolveStatusA({ connected: false });
+    await React.act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(handleInteractiveCloudLogin).toHaveBeenCalledTimes(1);
+    expect(
+      (popupB as unknown as { close: ReturnType<typeof vi.fn> }).close,
+    ).not.toHaveBeenCalled();
+    resolveLoginB();
+    unmount();
+  });
+
+  it("deadline retry keeps B's popup and blocks stale A before provisioning", async () => {
+    vi.useFakeTimers();
+    localStorage.removeItem("steward_session_token");
+    mocks.client.getCloudStatus.mockResolvedValue({ connected: false });
+    let resolveA: () => void = () => {};
+    let resolveB: () => void = () => {};
+    const handleInteractiveCloudLogin = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveA = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveB = resolve;
+          }),
+      );
+    const spies = seedAppStore({
+      elizaCloudConnected: false,
+      handleInteractiveCloudLogin,
+    });
+    const popupA = { closed: false, close: vi.fn() } as unknown as Window;
+    const popupB = { closed: false, close: vi.fn() } as unknown as Window;
+    vi.mocked(window.open)
+      .mockReturnValueOnce(popupA)
+      .mockReturnValueOnce(popupB);
+    const { turn, unmount } = renderConductor();
+    await vi.waitFor(() => expect(turn("first-run:greeting")).toBeTruthy());
+
+    expect(tryHandleFirstRunAction("__first_run__:runtime:cloud")).toBe(true);
+    await vi.waitFor(() =>
+      expect(handleInteractiveCloudLogin).toHaveBeenCalledTimes(1),
+    );
+    await React.act(async () => {
+      await vi.advanceTimersByTimeAsync(CLOUD_LOGIN_WAIT_DEADLINE_MS);
+    });
+    expect(turn("first-run:cloud-login-waiting")?.text).toContain("try again");
+
+    expect(tryHandleFirstRunAction("__first_run__:runtime:cloud")).toBe(true);
+    await vi.waitFor(() =>
+      expect(handleInteractiveCloudLogin).toHaveBeenCalledTimes(2),
+    );
+    resolveA();
+    await React.act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.client.selectOrProvisionCloudAgent).not.toHaveBeenCalled();
+    expect(spies.completeFirstRun).not.toHaveBeenCalled();
+    expect(
+      (popupB as unknown as { close: ReturnType<typeof vi.fn> }).close,
+    ).not.toHaveBeenCalled();
+    // B is still the globally available gesture claim after stale A settles.
+    expect(takeClaimedCloudLoginWindow()).toBe(popupB);
+
+    localStorage.setItem("steward_session_token", "cloud-token");
+    resolveB();
+    await vi.waitFor(() =>
+      expect(mocks.client.selectOrProvisionCloudAgent).toHaveBeenCalledTimes(1),
+    );
+    await vi.waitFor(() =>
+      expect(spies.completeFirstRun).toHaveBeenCalledTimes(1),
+    );
+    unmount();
+  });
+
+  it("settle/reject cancels the login deadline instead of surfacing a late timeout", async () => {
+    vi.useFakeTimers();
+    localStorage.removeItem("steward_session_token");
+    mocks.client.getCloudStatus.mockResolvedValue({ connected: false });
+    seedAppStore({
+      elizaCloudConnected: false,
+      handleInteractiveCloudLogin: vi.fn(async () => {
+        throw new Error("login rejected");
+      }),
+    });
+    const { transcript, turn, unmount } = renderConductor();
+    await vi.waitFor(() => expect(turn("first-run:greeting")).toBeTruthy());
+    expect(tryHandleFirstRunAction("__first_run__:runtime:cloud")).toBe(true);
+    await vi.waitFor(() =>
+      expect(
+        transcript.current.some((message: ConversationMessage) =>
+          message.id.startsWith("first-run:error:"),
+        ),
+      ).toBe(true),
+    );
+    await React.act(async () => {
+      await vi.advanceTimersByTimeAsync(CLOUD_LOGIN_WAIT_DEADLINE_MS);
+    });
+    expect(turn("first-run:cloud-login-waiting")?.text).not.toContain(
+      "That sign-in window didn't finish",
+    );
+    unmount();
+  });
+
+  it("cancels the login deadline before a slow post-login status probe", async () => {
+    vi.useFakeTimers();
+    localStorage.removeItem("steward_session_token");
+    let resolvePostLoginStatus: (status: { connected: boolean }) => void =
+      () => {};
+    mocks.client.getCloudStatus
+      .mockResolvedValueOnce({ connected: false })
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ connected: boolean }>((resolve) => {
+            resolvePostLoginStatus = resolve;
+          }),
+      );
+    seedAppStore({
+      elizaCloudConnected: false,
+      handleInteractiveCloudLogin: vi.fn(async () => {}),
+    });
+    const { turn, unmount } = renderConductor();
+    await vi.waitFor(() => expect(turn("first-run:greeting")).toBeTruthy());
+    expect(tryHandleFirstRunAction("__first_run__:runtime:cloud")).toBe(true);
+    await vi.waitFor(() =>
+      expect(mocks.client.getCloudStatus).toHaveBeenCalledTimes(2),
+    );
+
+    await React.act(async () => {
+      await vi.advanceTimersByTimeAsync(CLOUD_LOGIN_WAIT_DEADLINE_MS);
+    });
+    expect(turn("first-run:cloud-login-waiting")?.text).not.toContain(
+      "That sign-in window didn't finish",
+    );
+
+    resolvePostLoginStatus({ connected: false });
+    await React.act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    unmount();
+  });
+
+  it("teardown cancels the deadline, releases its popup, and blocks late continuation", async () => {
+    vi.useFakeTimers();
+    localStorage.removeItem("steward_session_token");
+    mocks.client.getCloudStatus.mockResolvedValue({ connected: false });
+    let resolveLogin: () => void = () => {};
+    const spies = seedAppStore({
+      elizaCloudConnected: false,
+      handleInteractiveCloudLogin: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveLogin = resolve;
+          }),
+      ),
+    });
+    const close = vi.fn();
+    vi.mocked(window.open).mockReturnValueOnce({
+      closed: false,
+      close,
+    } as unknown as Window);
+    const { transcript, turn, unmount } = renderConductor();
+    await vi.waitFor(() => expect(turn("first-run:greeting")).toBeTruthy());
+    expect(tryHandleFirstRunAction("__first_run__:runtime:cloud")).toBe(true);
+    await vi.waitFor(() =>
+      expect(turn("first-run:cloud-login-waiting")).toBeTruthy(),
+    );
+    const turnsAtUnmount = transcript.current.length;
+
+    unmount();
+    expect(close).toHaveBeenCalledTimes(1);
+    await React.act(async () => {
+      await vi.advanceTimersByTimeAsync(CLOUD_LOGIN_WAIT_DEADLINE_MS);
+      resolveLogin();
+      await Promise.resolve();
+    });
+    expect(transcript.current).toHaveLength(turnsAtUnmount);
+    expect(mocks.client.selectOrProvisionCloudAgent).not.toHaveBeenCalled();
+    expect(spies.completeFirstRun).not.toHaveBeenCalled();
+  });
+
   it("needs-cloud-login re-offers the sign-in button only — never the runtime chooser", async () => {
     localStorage.removeItem("steward_session_token");
     mocks.client.getCloudStatus.mockResolvedValue({ connected: false });
@@ -1788,7 +2028,7 @@ describe("cloud-only onboarding (runtime chooser off — the production default)
     // the error recovery turn directly (errors always render, silent or not).
     await waitFor(() => {
       expect(
-        transcript.current.some((message) =>
+        transcript.current.some((message: ConversationMessage) =>
           message.id.startsWith("first-run:error:"),
         ),
       ).toBe(true);

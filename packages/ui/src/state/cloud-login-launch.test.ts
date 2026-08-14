@@ -15,6 +15,7 @@ import {
   CLOUD_LOGIN_POPUP_NAME,
   canNavigateSameTabForBlockedPopup,
   claimCloudLoginWindow,
+  claimOwnedCloudLoginWindow,
   hasSameOriginStewardLogin,
   isTouchPrimaryWebBrowser,
   preOpenCloudLoginWindow,
@@ -267,6 +268,24 @@ describe("releaseClaimedCloudLoginWindow", () => {
     expect(popup.close).not.toHaveBeenCalled();
     // Empty stash: nothing to close, nothing throws.
     releaseClaimedCloudLoginWindow();
+  });
+
+  it("an old ownership token cannot release a newer attempt's popup", () => {
+    const oldPopup = makePopup(false);
+    const freshPopup = makePopup(false);
+    vi.spyOn(window, "open")
+      .mockReturnValueOnce(oldPopup)
+      .mockReturnValueOnce(freshPopup);
+
+    const oldClaim = claimOwnedCloudLoginWindow();
+    // Interactive login consumed A's handle before it stalled.
+    expect(takeClaimedCloudLoginWindow()).toBe(oldPopup);
+    const freshClaim = claimOwnedCloudLoginWindow();
+
+    oldClaim.release();
+    expect(freshPopup.close).not.toHaveBeenCalled();
+    expect(takeClaimedCloudLoginWindow()).toBe(freshPopup);
+    freshClaim.release();
   });
 });
 

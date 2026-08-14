@@ -77,6 +77,7 @@ import { ACCENT_PRESETS, useAppSelectorShallow } from "../state";
 import { useConversationMessages } from "../state/ConversationMessagesContext.hooks";
 import {
   claimCloudLoginWindow,
+  claimOwnedCloudLoginWindow,
   releaseClaimedCloudLoginWindow,
 } from "../state/cloud-login-launch";
 import { hasUsableStoredStewardToken } from "../state/cloud-steward-login";
@@ -472,6 +473,22 @@ export function useFirstRunConductor(): void {
   // Generation guard for cloud sign-in attempts (#19255): outcomes of an
   // attempt the deadline abandoned must not mutate newer state.
   const cloudLoginAttemptRef = React.useRef(createAttemptGuard());
+  const cloudLoginDeadlineRef = React.useRef<{ cancel(): void } | null>(null);
+  const cloudLoginPopupClaimRef = React.useRef<{ release(): void } | null>(
+    null,
+  );
+  // Unmount invalidates every async continuation and clears the live deadline;
+  // late login completion must never mutate a torn-down conductor.
+  React.useEffect(
+    () => () => {
+      cloudLoginDeadlineRef.current?.cancel();
+      cloudLoginDeadlineRef.current = null;
+      cloudLoginPopupClaimRef.current?.release();
+      cloudLoginPopupClaimRef.current = null;
+      cloudLoginAttemptRef.current.invalidate();
+    },
+    [],
+  );
   // Latched by the first tutorial pick: the store flip unregisters the handler
   // only on the next commit, so a double-tap could otherwise re-fire
   // completeFirstRun/startTutorial in the gap.
@@ -801,17 +818,56 @@ export function useFirstRunConductor(): void {
   // ── Flow launchers (shared by the action handler + the auto-resume) ──────
   const startCloudProvisionFlow = React.useCallback(() => {
     busyRef.current = true;
-    // Explicit waiting state on the opener while Cloud auth runs in the
-    // popup/tab — the sign-in CTA must not look idle (#18001). A silent cloud
-    // entry (#15133) reuses a stored session and never opens a window, so it
-    // must stay silent: no waiting turn until the flow turns interactive.
+    // Pre-open synchronously inside the gesture, but retain attempt ownership:
+    // a stale attempt's cleanup must never consume a newer attempt's popup.
+    const popupClaim = claimOwnedCloudLoginWindow();
+    cloudLoginPopupClaimRef.current = popupClaim;
     const attempt = cloudLoginAttemptRef.current.begin();
-    // The wait is BOUNDED (#19255): a callback failure dead-ends cross-origin
-    // in the popup and an abandoned popup never settles, so nothing in the
-    // promise chain below rejects. On deadline the wait converts into the
-    // recoverable retry turn and this attempt goes stale; a sign-in that
-    // completes after abandonment is picked up by the auto-resume effect.
     let loginDeadline: { cancel(): void } | null = null;
+    const cancelLoginDeadline = () => {
+      loginDeadline?.cancel();
+      if (cloudLoginDeadlineRef.current === loginDeadline) {
+        cloudLoginDeadlineRef.current = null;
+      }
+      loginDeadline = null;
+    };
+    const assertActive = () => {
+      if (!cloudLoginAttemptRef.current.isCurrent(attempt)) {
+        throw new Error("Cloud login attempt was abandoned");
+      }
+    };
+    const basePorts = portsRef.current;
+    const attemptPorts: FirstRunFinishPorts = {
+      ...basePorts,
+      assertActive,
+      onCloudLoginSettled: cancelLoginDeadline,
+      setRuntimeState: (key, value) => {
+        assertActive();
+        basePorts.setRuntimeState(key, value);
+      },
+      completeFirstRun: (landingTab) => {
+        assertActive();
+        basePorts.completeFirstRun(landingTab);
+      },
+      onStatus: (text, code) => {
+        assertActive();
+        basePorts.onStatus?.(text, code);
+      },
+      handleInteractiveCloudLogin: async (options) => {
+        // A deadline can fire while the pre-login status probe is still in
+        // flight. Check before entering the interactive login port so stale A
+        // cannot consume the globally stashed popup now owned by retry B.
+        assertActive();
+        await basePorts.handleInteractiveCloudLogin(options);
+        // This is the first line after the potentially unbounded login await.
+        // A deadline-abandoned attempt stops here, before list/provision/bind.
+        assertActive();
+      },
+    };
+
+    // Explicit waiting state on the opener while Cloud auth runs in the
+    // popup/tab. The deadline is LOGIN-ONLY: once authentication settles,
+    // provisioning retains the true single-flight latch until it finishes.
     if (!silentCloudEntryRef.current) {
       seedTurn(
         makeTurn(
@@ -824,10 +880,13 @@ export function useFirstRunConductor(): void {
           if (!cloudLoginAttemptRef.current.isCurrent(attempt)) return;
           cloudLoginAttemptRef.current.invalidate();
           busyRef.current = false;
-          releaseClaimedCloudLoginWindow();
-          // The notice carries the sign-in choice itself: at this point the
-          // original cloud-oauth turn has been consumed, so re-seeding by
-          // that id can no-op and "try again below" would have no below.
+          popupClaim.release();
+          if (cloudLoginPopupClaimRef.current === popupClaim) {
+            cloudLoginPopupClaimRef.current = null;
+          }
+          if (cloudLoginDeadlineRef.current === loginDeadline) {
+            cloudLoginDeadlineRef.current = null;
+          }
           replaceTurn(
             "first-run:cloud-login-waiting",
             makeTurn(
@@ -841,51 +900,35 @@ export function useFirstRunConductor(): void {
           );
         },
       });
+      cloudLoginDeadlineRef.current = loginDeadline;
     }
-    // Pre-open the cloud-login popup synchronously NOW — the action handler is
-    // still inside the user gesture, but the provision flow below awaits
-    // several network round-trips before reaching the (async) interactive login
-    // entry point. User activation does not survive those awaits, so opening the
-    // window here keeps the popup path (#15143) while entry point's named
-    // `window.open` would be blocked (#17064 regression guard).
-    claimCloudLoginWindow();
-    void listOrAutoProvisionCloudAgent(draftRef.current, portsRef.current)
+
+    void listOrAutoProvisionCloudAgent(draftRef.current, attemptPorts)
       .then((outcome) => {
-        loginDeadline?.cancel();
-        // Stale attempt: the deadline already surfaced the retry turn — this
-        // outcome must not mutate newer state. A genuinely late successful
-        // sign-in reaches the store and the auto-resume effect instead.
+        cancelLoginDeadline();
         if (!cloudLoginAttemptRef.current.isCurrent(attempt)) return;
         if (
           outcome.kind === "done" ||
           outcome.kind === "pick-cloud-agent" ||
           outcome.kind === "handoff-started"
         ) {
-          // Login resolved + provisioning is proceeding — the resume marker has
-          // served its purpose; drop it so a later relaunch doesn't re-resume.
           clearCloudLoginPending();
         }
         handleOutcome(outcome);
       })
-      // error-policy:J4 unlike runFirstRunFinish (which funnels throws to
-      // seedError), these cloud entrypoints can reject (OAuth/network);
-      // without this a rejected OAuth/provision call strands the user with no
-      // recovery action.
       .catch((err: unknown) => {
-        loginDeadline?.cancel();
+        cancelLoginDeadline();
         if (!cloudLoginAttemptRef.current.isCurrent(attempt)) return;
         seedError(cloudFailureMessage(err));
       })
       .finally(() => {
-        // Only the current attempt owns the busy latch — a deadline may have
-        // released it and a newer attempt claimed it.
         if (cloudLoginAttemptRef.current.isCurrent(attempt)) {
           busyRef.current = false;
         }
-        // Paths that never reach interactive login (already-authenticated
-        // cloud sessions short-circuit before the popup is consumed) must not
-        // leave the gesture-claimed about:blank window open.
-        releaseClaimedCloudLoginWindow();
+        popupClaim.release();
+        if (cloudLoginPopupClaimRef.current === popupClaim) {
+          cloudLoginPopupClaimRef.current = null;
+        }
       });
   }, [handleOutcome, seedError, seedTurn, replaceTurn]);
 

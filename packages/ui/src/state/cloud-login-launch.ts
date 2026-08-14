@@ -116,6 +116,31 @@ export function claimCloudLoginWindow(): Window | null {
 }
 
 /**
+ * Attempt-scoped ownership token for launchers that can overlap after a
+ * deadline. Releasing an older token never consumes or closes a newer
+ * attempt's globally stashed popup.
+ */
+export interface CloudLoginWindowClaim {
+  readonly window: Window | null;
+  release(): void;
+}
+
+export function claimOwnedCloudLoginWindow(): CloudLoginWindowClaim {
+  const claimed = claimCloudLoginWindow();
+  let released = false;
+  return {
+    window: claimed,
+    release() {
+      if (released) return;
+      released = true;
+      if (!claimed || stashedCloudLoginWindow !== claimed) return;
+      stashedCloudLoginWindow = null;
+      if (!claimed.closed) claimed.close();
+    },
+  };
+}
+
+/**
  * Consume the gesture-claimed popup handle, if any. The interactive login entry
  * point calls this instead of (or before falling back to) pre-opening itself.
  */
