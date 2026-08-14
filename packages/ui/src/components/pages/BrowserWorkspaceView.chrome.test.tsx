@@ -193,6 +193,10 @@ describe("BrowserWorkspaceView fullscreen chrome (Notes/Calendar parity)", () =>
     expect(
       toolbar.contains(screen.getByTestId("browser-workspace-address-input")),
     ).toBe(true);
+    // The top-left back button lives inside the floating toolbar.
+    expect(
+      screen.getByRole("button", { name: "Back to launcher" }),
+    ).not.toBeNull();
   });
 
   it("reserves the measured resting chat footprint and safe-area stack from the page viewport", async () => {

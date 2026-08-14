@@ -735,6 +735,36 @@ body.pwa-standalone * {
   }
 }
 
+@keyframes window-minimize-out {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.88) translateY(1.25rem);
+  }
+}
+
+@keyframes window-maximize-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.94) translateY(0.75rem);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-window-maximize {
+  animation: window-maximize-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-window-minimize {
+  animation: window-minimize-out 0.18s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
 /* A freshly-arrived chat turn fades + lifts in. Subtler than shell-overlay-in
    (a single bubble, not the whole panel). Applied via
    `motion-safe:animate-[chat-turn-in_...]` on the message <article>, scoped to

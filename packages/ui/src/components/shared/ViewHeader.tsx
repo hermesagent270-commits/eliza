@@ -8,6 +8,7 @@ import { useAgentElement } from "../../agent-surface";
 import { cn } from "../../lib/utils";
 import { shouldUseHashNavigation } from "../../navigation";
 import { shellHistory } from "../../surface-realm-channel";
+import { TooltipHint } from "../ui/tooltip";
 
 /**
  * Return to the combined home/apps surface — the default "back" for any
@@ -33,10 +34,7 @@ export function navigateBackToLauncher(): void {
  * The shared view back button: an icon, nothing else. Deliberately chromeless —
  * no border, no shadow, no filled circle, and NO rest-state fill so it reads as
  * a bare icon on every surface (#13451/#13586: the normal-view header back
- * affordance is icon-only, with no border/background/circle at rest). Fixing
- * the primitive fixes every consumer at once. A subtle neutral `bg-hover` chip
- * (square-cornered `rounded-md`, NOT the old `rounded-full` disc) only appears
- * on hover for affordance, never in the resting state. Focus styling is NOT
+ * button uses a simple hover chip). Focus-visible outline style is NOT
  * sprinkled here: it is centralized in CSS (`--focus`) per the no-focus-ring
  * gate, so this primitive carries no `focus`/`ring` utilities.
  */
@@ -59,27 +57,43 @@ export function ViewBackButton({
     description: "Return to the launcher",
     onActivate: handleBack,
   });
+
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const windowTarget =
+      (e.currentTarget.closest('[data-testid="app-workspace-chrome"]') as HTMLElement | null) ||
+      (e.currentTarget.closest('[data-view-lifecycle-slot]') as HTMLElement | null) ||
+      (e.currentTarget.closest('[data-testid="browser-workspace-toolbar"]') as HTMLElement | null);
+    if (windowTarget) {
+      windowTarget.classList.add("animate-window-minimize");
+    }
+    setTimeout(() => {
+      handleBack();
+    }, 120);
+  };
+
   // The BUTTON is the hit target and must meet the 44px mobile minimum on its
   // own box (#13586 / #14152 — a tap target borrowed from the surrounding row
   // is not clickable-by-contract). h-11 w-11 with -m-1 keeps the 36px layout
   // footprint; the visual affordance (36px hover chip) lives on the inner span
   // so the resting/hover appearance is unchanged.
   return (
-    <button
-      ref={ref}
-      type="button"
-      onClick={handleBack}
-      aria-label={label}
-      className={cn(
-        "group -m-1 inline-flex h-11 w-11 items-center justify-center bg-transparent text-txt",
-        className,
-      )}
-      {...agentProps}
-    >
-      <span className="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors group-hover:bg-bg-hover">
-        <ArrowLeft className="h-5 w-5" aria-hidden />
-      </span>
-    </button>
+    <TooltipHint content={label} side="bottom">
+      <button
+        ref={ref}
+        type="button"
+        onClick={handleClick}
+        aria-label={label}
+        className={cn(
+          "group -m-1 inline-flex h-11 w-11 items-center justify-center bg-transparent text-txt",
+          className,
+        )}
+        {...agentProps}
+      >
+        <span className="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors group-hover:bg-bg-hover">
+          <ArrowLeft className="h-5 w-5" aria-hidden />
+        </span>
+      </button>
+    </TooltipHint>
   );
 }
 

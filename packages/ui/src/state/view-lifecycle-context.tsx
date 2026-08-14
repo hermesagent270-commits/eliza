@@ -15,7 +15,9 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useState,
 } from "react";
+import { cn } from "../lib/utils";
 import { viewLifecycleController } from "./view-lifecycle";
 import type { ViewLifecycleListener } from "./view-lifecycle-types";
 
@@ -51,9 +53,21 @@ export function ViewLifecycleSlot({
   hidden,
   children,
 }: ViewLifecycleSlotProps): React.JSX.Element {
+  const [isHiding, setIsHiding] = useState(hidden);
+
   useEffect(() => {
     viewLifecycleController.register(viewId);
   }, [viewId]);
+
+  useEffect(() => {
+    if (hidden) {
+      const timer = setTimeout(() => {
+        setIsHiding(true);
+      }, 180);
+      return () => clearTimeout(timer);
+    }
+    setIsHiding(false);
+  }, [hidden]);
 
   const value = useMemo<ViewLifecycleSlotValue>(
     () => ({
@@ -64,21 +78,25 @@ export function ViewLifecycleSlot({
     [viewId],
   );
 
+  const effectivelyHidden = hidden && isHiding;
+
   return (
     <ViewLifecycleSlotContext.Provider value={value}>
       <div
         data-view-lifecycle-slot={viewId}
         data-view-hidden={hidden ? "true" : "false"}
-        // `inert` (React 19 boolean prop) removes the hidden subtree from the tab
-        // order + a11y tree and blocks pointer/focus; display:none stops layout +
-        // paint. Both so a retained view is truly dormant, not just covered.
-        {...(hidden ? { inert: true } : {})}
-        aria-hidden={hidden ? "true" : undefined}
-        style={hidden ? { display: "none" } : undefined}
-        className="flex flex-col flex-1 min-h-0 min-w-0 w-full"
+        {...(effectivelyHidden ? { inert: true } : {})}
+        aria-hidden={effectivelyHidden ? "true" : undefined}
+        style={effectivelyHidden ? { display: "none" } : undefined}
+        className={cn(
+          "flex flex-col flex-1 min-h-0 min-w-0 w-full transition-transform",
+          !hidden && "motion-safe:animate-window-maximize",
+          hidden && !effectivelyHidden && "motion-safe:animate-window-minimize pointer-events-none",
+        )}
       >
         {children}
       </div>
     </ViewLifecycleSlotContext.Provider>
   );
 }
+
