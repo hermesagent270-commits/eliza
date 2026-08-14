@@ -11,6 +11,9 @@ import { EscalationService } from "../services/escalation.ts";
 import {
   createErrorReportedEscalationHandler,
   ErrorEscalationTracker,
+  registerErrorEscalation,
+  resolveThreshold,
+  resolveWindowMs,
 } from "./error-escalation.ts";
 
 function payload(code: string): ErrorReportedPayload {
@@ -159,6 +162,101 @@ describe("ERROR_REPORTED escalation handler", () => {
 
     await expect(handler(payload("X"))).resolves.toBeUndefined();
     expect(reportError).not.toHaveBeenCalled();
+  });
+});
+
+describe("error-escalation configuration", () => {
+  function runtimeWithSettings(
+    settings: Record<string, string | undefined>,
+  ): IAgentRuntime {
+    return {
+      getSetting: (key: string) => settings[key],
+    } as unknown as IAgentRuntime;
+  }
+
+  it("uses defaults for unset, empty, and whitespace-only settings", () => {
+    expect(resolveThreshold(runtimeWithSettings({}))).toBe(3);
+    for (const blank of ["", "  "]) {
+      expect(
+        resolveThreshold(
+          runtimeWithSettings({ ERROR_ESCALATION_THRESHOLD: blank }),
+        ),
+      ).toBe(3);
+    }
+    expect(resolveWindowMs(runtimeWithSettings({}))).toBe(10 * 60_000);
+    for (const blank of ["", "  "]) {
+      expect(
+        resolveWindowMs(
+          runtimeWithSettings({ ERROR_ESCALATION_WINDOW_MINUTES: blank }),
+        ),
+      ).toBe(10 * 60_000);
+    }
+  });
+
+  it.each([
+    ["5", 5],
+    ["1", 1],
+  ])("resolves threshold %s", (configured, expected) => {
+    expect(
+      resolveThreshold(
+        runtimeWithSettings({ ERROR_ESCALATION_THRESHOLD: configured }),
+      ),
+    ).toBe(expected);
+  });
+
+  it.each([
+    ["30", 30 * 60_000],
+    ["1.5", 90_000],
+    ["0.5", 30_000],
+  ])("resolves window %s minutes", (configured, expected) => {
+    expect(
+      resolveWindowMs(
+        runtimeWithSettings({ ERROR_ESCALATION_WINDOW_MINUTES: configured }),
+      ),
+    ).toBe(expected);
+  });
+
+  it.each(["3oops", "1e2", "0", "-2", "2.5", "abc"])(
+    "rejects invalid threshold %s",
+    (configured) => {
+      expect(() =>
+        resolveThreshold(
+          runtimeWithSettings({ ERROR_ESCALATION_THRESHOLD: configured }),
+        ),
+      ).toThrow(
+        new RegExp(
+          `ERROR_ESCALATION_THRESHOLD.*${configured.replace(".", "\\.")}`,
+        ),
+      );
+    },
+  );
+
+  it.each(["10abc", "0", "-5", "abc", "Infinity", "NaN"])(
+    "rejects invalid window %s",
+    (configured) => {
+      expect(() =>
+        resolveWindowMs(
+          runtimeWithSettings({ ERROR_ESCALATION_WINDOW_MINUTES: configured }),
+        ),
+      ).toThrow(
+        new RegExp(
+          `ERROR_ESCALATION_WINDOW_MINUTES.*${configured.replace("-", "\\-")}`,
+        ),
+      );
+    },
+  );
+
+  it("propagates invalid configuration during registration", () => {
+    const runtime = {
+      getSetting: (key: string) =>
+        key === "ERROR_ESCALATION_THRESHOLD" ? "3oops" : undefined,
+      registerEvent: vi.fn(),
+    } as unknown as IAgentRuntime;
+
+    expect(() => registerErrorEscalation(runtime)).toThrow(
+      /ERROR_ESCALATION_THRESHOLD.*3oops/,
+    );
+    expect(runtime.registerEvent).not.toHaveBeenCalled();
   });
 });
 

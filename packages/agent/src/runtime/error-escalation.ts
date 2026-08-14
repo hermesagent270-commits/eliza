@@ -54,18 +54,40 @@ export class ErrorEscalationTracker {
   }
 }
 
-function resolveThreshold(runtime: IAgentRuntime): number {
+export function resolveThreshold(runtime: IAgentRuntime): number {
   const raw = runtime.getSetting?.("ERROR_ESCALATION_THRESHOLD");
-  const parsed = raw ? Number(raw) : Number.NaN;
-  return Number.isInteger(parsed) && parsed >= 1 ? parsed : DEFAULT_THRESHOLD;
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return DEFAULT_THRESHOLD;
+  }
+
+  const value = String(raw).trim();
+  const parsed = Number(value);
+  if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(
+      `Invalid ERROR_ESCALATION_THRESHOLD value ${JSON.stringify(raw)}: expected a decimal integer >= 1`,
+    );
+  }
+  return parsed;
 }
 
-function resolveWindowMs(runtime: IAgentRuntime): number {
+export function resolveWindowMs(runtime: IAgentRuntime): number {
   const raw = runtime.getSetting?.("ERROR_ESCALATION_WINDOW_MINUTES");
-  const parsed = raw ? Number(raw) : Number.NaN;
-  const minutes =
-    Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_WINDOW_MINUTES;
-  return minutes * 60 * 1000;
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return DEFAULT_WINDOW_MINUTES * 60 * 1000;
+  }
+
+  const value = String(raw).trim();
+  const parsed = Number(value);
+  if (
+    !/^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$/.test(value) ||
+    !Number.isFinite(parsed) ||
+    parsed <= 0
+  ) {
+    throw new Error(
+      `Invalid ERROR_ESCALATION_WINDOW_MINUTES value ${JSON.stringify(raw)}: expected a positive plain-decimal number`,
+    );
+  }
+  return parsed * 60 * 1000;
 }
 
 /**
