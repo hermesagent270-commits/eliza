@@ -26,6 +26,7 @@ const callbackState = vi.hoisted(() => ({
   pendingReturnTo: null as string | null,
   resend: vi.fn(),
   publishComplete: vi.fn(),
+  isAuthenticated: false,
 }));
 
 const sessionSpies = vi.hoisted(() => ({
@@ -47,7 +48,7 @@ vi.mock("../../../shell/StewardProvider", async () => {
       <div data-testid="steward-auth-provider">
         <LocalStewardAuthContext.Provider
           value={{
-            isAuthenticated: false,
+            isAuthenticated: callbackState.isAuthenticated,
             isLoading: false,
             user: null,
             session: null,
@@ -115,6 +116,7 @@ beforeEach(() => {
     pollSecret: "fresh-secret",
   });
   callbackState.publishComplete.mockReset();
+  callbackState.isAuthenticated = false;
   sessionSpies.sync.mockReset();
   sessionSpies.sync.mockResolvedValue(undefined);
   callbackState.pendingReturnTo = null;
@@ -308,6 +310,35 @@ describe("EmailCallbackPage", () => {
     expect(
       JSON.stringify(callbackState.publishComplete.mock.calls),
     ).not.toContain("private-session-token");
+  });
+
+  it("rejects a replayed callback without broadcasting when this tab already has a session", async () => {
+    callbackState.isAuthenticated = true;
+    callbackState.verifyEmailCallback.mockRejectedValue(
+      new StewardApiError("already used", 410),
+    );
+
+    render(
+      <MemoryRouter
+        initialEntries={[
+          "/auth/callback/email?token=replayed-token&email=person%40example.com",
+        ]}
+      >
+        <EmailCallbackPage />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByText(
+        "That sign-in link expired or was already used. Please sign in again.",
+      ),
+    ).toBeTruthy();
+    expect(callbackState.verifyEmailCallback).toHaveBeenCalledWith(
+      "replayed-token",
+      "person@example.com",
+    );
+    expect(sessionSpies.sync).not.toHaveBeenCalled();
+    expect(callbackState.publishComplete).not.toHaveBeenCalled();
   });
 
   it("restores a pending messaging continuation after magic-link verification", async () => {

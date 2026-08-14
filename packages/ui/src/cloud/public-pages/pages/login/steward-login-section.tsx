@@ -26,7 +26,15 @@ import type {
 } from "@stwd/sdk";
 import { StewardApiError, StewardAuth } from "@stwd/sdk";
 import { AlertCircle } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Navigate,
   useLocation,
@@ -367,6 +375,9 @@ export default function StewardLoginSection() {
   const [externalSuccessDestination, setExternalSuccessDestination] = useState<
     string | null
   >(null);
+  const sharedSessionRecoveryRef = useRef<
+    ReturnType<typeof recoverStewardSessionViaCookie> | undefined
+  >(undefined);
   // Detected once, synchronously, BEFORE the callback-consuming effect below
   // strips `?code`/`#token` from the URL. While this is true the section shows a
   // terminal "completing sign-in" state instead of re-rendering the provider
@@ -395,6 +406,20 @@ export default function StewardLoginSection() {
   const showWallets = hasAnyWalletProvider(providers);
   const showPasskey =
     providers.passkey !== false && passkeyCapability?.usable === true;
+
+  const recoverSharedEmailSession = useCallback(() => {
+    const pending = sharedSessionRecoveryRef.current;
+    if (pending) return pending;
+
+    const recovery: ReturnType<typeof recoverStewardSessionViaCookie> =
+      recoverStewardSessionViaCookie().finally(() => {
+        if (sharedSessionRecoveryRef.current === recovery) {
+          sharedSessionRecoveryRef.current = undefined;
+        }
+      });
+    sharedSessionRecoveryRef.current = recovery;
+    return recovery;
+  }, []);
 
   useEffect(() => {
     if (PLAYWRIGHT_TEST_AUTH_ENABLED) {
@@ -591,6 +616,40 @@ export default function StewardLoginSection() {
         );
         if (cancelled) return;
         const mapped = mapChallengeStatus(status);
+        if (mapped === "approved") {
+          try {
+            const recovered = await recoverSharedEmailSession();
+            if (cancelled) return;
+            if (recovered) {
+              if (recovered.token) {
+                persistStewardToken(recovered.token);
+                window.dispatchEvent(new CustomEvent("steward-token-sync"));
+              }
+              setExternalSuccessDestination(resolveLoginReturnTo(searchParams));
+              setEmailCheckState("approved");
+              setError(null);
+              setStep("external-success");
+            } else {
+              setEmailCheckState("approved");
+              setError(
+                "The link was used, but this tab could not restore the shared session. Continue in the tab that opened the link or request a fresh email.",
+              );
+            }
+          } catch (sessionError) {
+            // error-policy:J4 a consumed challenge without a recoverable shared
+            // session remains visibly nonterminal and offers resend recovery.
+            if (!cancelled) {
+              setEmailCheckState("approved");
+              setError(
+                getErrorMessage(
+                  sessionError,
+                  "The link was used, but this tab could not restore the shared session.",
+                ),
+              );
+            }
+          }
+          return;
+        }
         setEmailCheckState(mapped);
         if (mapped !== "pending") return;
       } catch (pollError) {
@@ -613,17 +672,58 @@ export default function StewardLoginSection() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [emailChallenge, emailCheckState, step, stewardApiUrl]);
+  }, [
+    emailChallenge,
+    emailCheckState,
+    recoverSharedEmailSession,
+    searchParams,
+    step,
+    stewardApiUrl,
+  ]);
 
   useEffect(() => {
     if (step !== "email-sent" || !email.trim()) return;
-    return subscribeStewardEmailLoginComplete(email, (message) => {
-      setExternalSuccessDestination(message.destination);
-      setEmailCheckState("approved");
-      setError(null);
-      setStep("external-success");
+    let cancelled = false;
+    const unsubscribe = subscribeStewardEmailLoginComplete(email, (message) => {
+      void (async () => {
+        try {
+          const recovered = await recoverSharedEmailSession();
+          if (cancelled) return;
+          if (!recovered) {
+            setEmailCheckState("approved");
+            setError(
+              "Sign-in finished elsewhere, but this tab could not restore the shared session. Continue in the other tab or request a fresh email.",
+            );
+            return;
+          }
+          if (recovered.token) {
+            persistStewardToken(recovered.token);
+            window.dispatchEvent(new CustomEvent("steward-token-sync"));
+          }
+          setExternalSuccessDestination(message.destination);
+          setEmailCheckState("approved");
+          setError(null);
+          setStep("external-success");
+        } catch (sessionError) {
+          // error-policy:J4 the advisory signal cannot create a signed-in UI;
+          // failed authoritative recovery stays visible with resend available.
+          if (!cancelled) {
+            setEmailCheckState("approved");
+            setError(
+              getErrorMessage(
+                sessionError,
+                "Sign-in finished elsewhere, but this tab could not restore the shared session.",
+              ),
+            );
+          }
+        }
+      })();
     });
-  }, [email, step]);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [email, recoverSharedEmailSession, step]);
 
   useEffect(() => {
     if (step !== "email-sent" || !emailChallenge) {

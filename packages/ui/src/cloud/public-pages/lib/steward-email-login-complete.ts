@@ -19,7 +19,22 @@ function normalizeEmail(email: string): string {
 }
 
 function isSafeDestination(destination: string): boolean {
-  return destination.startsWith("/") && !destination.startsWith("//");
+  if (
+    !destination.startsWith("/") ||
+    destination.startsWith("//") ||
+    destination.includes("\\") ||
+    typeof window === "undefined"
+  ) {
+    return false;
+  }
+
+  try {
+    const base = new URL(window.location.href);
+    const resolved = new URL(destination, base);
+    return resolved.origin === base.origin;
+  } catch {
+    return false;
+  }
 }
 
 export function isStewardEmailLoginCompleteMessage(
@@ -94,6 +109,8 @@ export function subscribeStewardEmailLoginComplete(
     channel = new BroadcastChannel(STEWARD_EMAIL_LOGIN_COMPLETE_CHANNEL);
   } catch (error) {
     void error;
+    // error-policy:J5 authoritative challenge polling observes the same
+    // completion when this optional low-latency transport is unavailable.
     return () => {};
   }
 

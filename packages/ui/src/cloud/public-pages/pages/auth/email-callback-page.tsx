@@ -179,13 +179,6 @@ function EmailCallbackContent() {
       }, 1500);
     };
 
-    if (auth.isAuthenticated) {
-      finishSuccess();
-      return () => {
-        if (redirectTimer) clearTimeout(redirectTimer);
-      };
-    }
-
     const token = searchParams.get("token");
     const callbackEmail = searchParams.get("email");
     if (!token || !callbackEmail) {
@@ -242,6 +235,8 @@ function EmailCallbackContent() {
       setResendAvailableAt(Date.now() + EMAIL_RESEND_COOLDOWN_MS);
       setResendStatus("sent");
     } catch (resendFailure) {
+      // error-policy:J4 a failed resend remains on the explicit recovery
+      // surface and reports the failure without fabricating a fresh challenge.
       setResendStatus("error");
       setResendError(
         resendFailure instanceof Error

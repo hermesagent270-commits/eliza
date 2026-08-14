@@ -1,3 +1,4 @@
+/** Verifies the token-free cross-tab Steward email-login completion signal. */
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -92,6 +93,7 @@ describe("Steward email login completion signal", () => {
     for (const destination of [
       "https://attacker.example",
       "//attacker.example",
+      "/\\\\evil.example",
     ]) {
       expect(
         isStewardEmailLoginCompleteMessage(

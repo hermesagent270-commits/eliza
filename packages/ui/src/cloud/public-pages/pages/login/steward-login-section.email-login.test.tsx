@@ -26,6 +26,7 @@ const emailLoginSpies = vi.hoisted(() => ({
 
 const sessionSpies = vi.hoisted(() => ({
   sync: vi.fn(),
+  recover: vi.fn(),
 }));
 
 const emailCompleteSpies = vi.hoisted(() => ({
@@ -99,7 +100,7 @@ vi.mock("../../lib/steward-session", () => ({
   consumeStewardCodeFromQuery: () => null,
   consumeStewardTokensFromHash: () => null,
   exchangeStewardCodeViaApi: vi.fn(),
-  recoverStewardSessionViaCookie: vi.fn(),
+  recoverStewardSessionViaCookie: sessionSpies.recover,
   refreshStewardSessionViaCookie: vi.fn(),
   syncStewardSessionCookie: sessionSpies.sync,
 }));
@@ -153,6 +154,7 @@ describe("StewardLoginSection email magic-link companion code", () => {
     });
     emailLoginSpies.poll.mockResolvedValue("pending");
     sessionSpies.sync.mockResolvedValue(undefined);
+    sessionSpies.recover.mockResolvedValue({ ok: true });
     emailCompleteSpies.listener = null;
     emailCompleteSpies.unsubscribe.mockReset();
   });
@@ -190,8 +192,29 @@ describe("StewardLoginSection email magic-link companion code", () => {
     );
   });
 
-  it("remote consumed status shows approval guidance without syncing a session", async () => {
+  it("recovers the shared cookie session when polling observes a consumed link", async () => {
     emailLoginSpies.poll.mockResolvedValue("consumed");
+    renderSection();
+    await startEmailLogin();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+
+    expect(await screen.findByText("Signed in")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Sign-in finished in another tab. You can continue here or close this tab.",
+      ),
+    ).toBeTruthy();
+    expect(sessionSpies.recover).toHaveBeenCalledOnce();
+    expect(sessionSpies.sync).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Six-digit code")).toBeNull();
+  });
+
+  it("keeps resend recovery visible when a consumed link has no shared session", async () => {
+    emailLoginSpies.poll.mockResolvedValue("consumed");
+    sessionSpies.recover.mockResolvedValue(null);
     renderSection();
     await startEmailLogin();
 
@@ -202,17 +225,17 @@ describe("StewardLoginSection email magic-link companion code", () => {
     expect(await screen.findByText("Link approved")).toBeTruthy();
     expect(
       screen.getByText(
-        "The link was approved elsewhere. This device was not signed in.",
+        "The link was used, but this tab could not restore the shared session. Continue in the tab that opened the link or request a fresh email.",
       ),
     ).toBeTruthy();
-    expect(sessionSpies.sync).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /Resend/i })).toBeTruthy();
   });
 
   it("dismisses the live waiting form when the callback succeeds in another tab", async () => {
     renderSection();
     await startEmailLogin();
 
-    expect(emailCompleteSpies.listener).not.toBeNull();
+    await waitFor(() => expect(emailCompleteSpies.listener).not.toBeNull());
     act(() => {
       emailCompleteSpies.listener?.({
         email: "person@example.com",
@@ -228,6 +251,7 @@ describe("StewardLoginSection email magic-link companion code", () => {
     ).toBeTruthy();
     expect(screen.queryByLabelText("Six-digit code")).toBeNull();
     expect(screen.queryByRole("button", { name: /Resend/i })).toBeNull();
+    expect(sessionSpies.recover).toHaveBeenCalledOnce();
     expect(sessionSpies.sync).not.toHaveBeenCalled();
   });
 
