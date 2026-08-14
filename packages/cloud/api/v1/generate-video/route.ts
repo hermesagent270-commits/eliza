@@ -21,6 +21,8 @@ import {
   type GeneratedVideo,
   VIDEO_PENDING_SETTLEMENT_MARKER,
   VideoGenerationPendingError,
+  VideoGenerationSubmissionUnknownError,
+  VideoGenerationTerminalError,
 } from "@/lib/providers/video/types";
 import {
   type BillingContext,
@@ -156,6 +158,7 @@ app.post("/", async (c) => {
   // the already-correct charge, giving a free video. Mirrors generate-image.
   let chargeSettled = false;
   let pendingContext: PendingSettlementContext | null = null;
+  let activeBillingRequestId: string | null = null;
 
   try {
     const { user, apiKeyId, admissionSnapshot } =
@@ -207,87 +210,61 @@ app.post("/", async (c) => {
         metadata: { type: "video", model: definitions[0].modelId },
       }),
       Promise.all(
-        providerCandidates.map(async ({ definition, provider }) => {
-          const defaults = getDefaultVideoBillingDimensions(definition.modelId);
-          const durationSeconds =
-            request.durationSeconds ?? defaults.durationSeconds;
-          const resolution =
-            request.resolution ?? definition.defaultParameters.resolution;
-          const audio = request.audio ?? definition.defaultParameters.audio;
-          const voiceControl =
-            request.voiceControl ?? definition.defaultParameters.voiceControl;
-          const dimensions = {
-            ...defaults.dimensions,
-            ...(resolution ? { resolution } : {}),
-            ...(audio !== undefined ? { audio } : {}),
-            ...(voiceControl !== undefined ? { voiceControl } : {}),
-            ...(defaults.dimensions.durationSeconds !== undefined
-              ? { durationSeconds }
-              : {}),
-          };
-          const cost = await calculateVideoGenerationCostFromCatalog({
-            model: definition.modelId,
-            billingSource: definition.billingSource,
-            durationSeconds,
-            dimensions,
-            cache: getGenerativePricingCacheOptions(c),
-          });
-          const billingContext: BillingContext = {
-            organizationId: user.organization_id,
-            userId: user.id,
-            apiKeyId,
-            model: definition.modelId,
-            provider: definition.provider,
-            billingSource: definition.billingSource,
-            requestId: operationRequestId,
-            affiliateCode: c.req.header("X-Affiliate-Code"),
-            description: `Video generation: ${definition.modelId}`,
-          };
-          return {
-            definition,
-            provider,
-            billingContext,
-            cost,
-            durationSeconds,
-            resolution,
-            audio,
-            voiceControl,
-          } satisfies PricedVideoCandidate;
-        }),
+        providerCandidates.map(
+          async ({ definition, provider }, candidateIndex) => {
+            const defaults = getDefaultVideoBillingDimensions(
+              definition.modelId,
+            );
+            const durationSeconds =
+              request.durationSeconds ?? defaults.durationSeconds;
+            const resolution =
+              request.resolution ?? definition.defaultParameters.resolution;
+            const audio = request.audio ?? definition.defaultParameters.audio;
+            const voiceControl =
+              request.voiceControl ?? definition.defaultParameters.voiceControl;
+            const dimensions = {
+              ...defaults.dimensions,
+              ...(resolution ? { resolution } : {}),
+              ...(audio !== undefined ? { audio } : {}),
+              ...(voiceControl !== undefined ? { voiceControl } : {}),
+              ...(defaults.dimensions.durationSeconds !== undefined
+                ? { durationSeconds }
+                : {}),
+            };
+            const cost = await calculateVideoGenerationCostFromCatalog({
+              model: definition.modelId,
+              billingSource: definition.billingSource,
+              durationSeconds,
+              dimensions,
+              cache: getGenerativePricingCacheOptions(c),
+            });
+            const billingContext: BillingContext = {
+              organizationId: user.organization_id,
+              userId: user.id,
+              apiKeyId,
+              model: definition.modelId,
+              provider: definition.provider,
+              billingSource: definition.billingSource,
+              requestId: `${operationRequestId}:${candidateIndex}`,
+              affiliateCode: c.req.header("X-Affiliate-Code"),
+              description: `Video generation: ${definition.modelId}`,
+            };
+            return {
+              definition,
+              provider,
+              billingContext,
+              cost,
+              durationSeconds,
+              resolution,
+              audio,
+              voiceControl,
+            } satisfies PricedVideoCandidate;
+          },
+        ),
       ),
     ]);
-    const primaryCandidate = candidates[0];
-    if (!primaryCandidate) {
+    if (!candidates[0]) {
       throw new Error("Configured video provider candidates were not priced");
-    }
-    const reservationCost = candidates.reduce(
-      (highest, candidate) =>
-        candidate.cost.totalCost > highest.totalCost ? candidate.cost : highest,
-      primaryCandidate.cost,
-    );
-
-    try {
-      admission = await admitFlatGenerativeOperation({
-        c,
-        context: primaryCandidate.billingContext,
-        apiKeyId,
-        cost: reservationCost,
-        admissionSnapshot,
-      });
-    } catch (error) {
-      // error-policy:J1 the HTTP boundary translates insufficient-credit
-      // admission into the stable route response and rethrows other failures.
-      if (error instanceof InsufficientCreditsError) {
-        return c.json(
-          {
-            success: false,
-            error: "Insufficient credits",
-            required: error.required,
-          },
-          402,
-        );
-      }
-      throw error;
     }
 
     let generated: GeneratedVideo | undefined;
@@ -296,6 +273,39 @@ app.post("/", async (c) => {
       | { candidate: PricedVideoCandidate; error: unknown }
       | undefined;
     for (const [index, candidate] of candidates.entries()) {
+      let attemptAdmission: Awaited<
+        ReturnType<typeof admitFlatGenerativeOperation>
+      >;
+      try {
+        attemptAdmission = await admitFlatGenerativeOperation({
+          c,
+          context: candidate.billingContext,
+          apiKeyId,
+          cost: candidate.cost,
+          idempotencyKey: candidate.billingContext.requestId ?? undefined,
+          admissionSnapshot,
+          // Pending video reconciliation is keyed by the reservation
+          // transaction. Keeping every provider attempt on that one durable
+          // ledger avoids a non-atomic DO-lease → DB-reservation handoff.
+          settlementMode: "synchronous_reservation",
+        });
+      } catch (error) {
+        // error-policy:J1 the HTTP boundary translates insufficient-credit
+        // admission into the stable route response and rethrows other failures.
+        if (error instanceof InsufficientCreditsError) {
+          return c.json(
+            {
+              success: false,
+              error: "Insufficient credits",
+              required: error.required,
+            },
+            402,
+          );
+        }
+        throw error;
+      }
+      admission = attemptAdmission;
+      activeBillingRequestId = candidate.billingContext.requestId ?? null;
       pendingContext = {
         organizationId: user.organization_id,
         userId: user.id,
@@ -313,7 +323,7 @@ app.post("/", async (c) => {
           voiceControl: candidate.voiceControl,
         },
       };
-      await admission.markProviderDispatched?.();
+      await attemptAdmission.markProviderDispatched?.();
       try {
         generated = await candidate.provider.generate({
           model: candidate.definition.modelId,
@@ -328,10 +338,27 @@ app.post("/", async (c) => {
         selectedCandidate = candidate;
         break;
       } catch (error) {
-        // error-policy:J1 the route retries only a verified terminal provider
-        // failure; pending work remains on its reconciliation boundary.
-        if (error instanceof VideoGenerationPendingError) throw error;
-        lastFailure = { candidate, error };
+        // error-policy:J1 only a typed, verified terminal result authorizes
+        // releasing this provider-specific reservation and trying another
+        // paid provider. Unknown submission state and known pending work retain
+        // their hold and stop the chain.
+        if (
+          error instanceof VideoGenerationPendingError ||
+          error instanceof VideoGenerationSubmissionUnknownError
+        ) {
+          throw error;
+        }
+        if (!(error instanceof VideoGenerationTerminalError)) {
+          throw new VideoGenerationSubmissionUnknownError(
+            error instanceof Error ? error.message : String(error),
+            error,
+          );
+        }
+        lastFailure = { candidate, error: error.providerCause ?? error };
+        await attemptAdmission.settle(0);
+        admission = undefined;
+        activeBillingRequestId = null;
+        pendingContext = null;
         if (index < candidates.length - 1) {
           logger.warn("[GenerateVideo] Provider failed; trying fallback", {
             provider: candidate.definition.provider,
@@ -363,6 +390,10 @@ app.post("/", async (c) => {
     }
     const { definition, billingContext, cost, durationSeconds } =
       selectedCandidate;
+    const successfulAdmission = admission;
+    if (!successfulAdmission) {
+      throw new Error("Successful video generation has no billing admission");
+    }
     if (generated.hasNsfwConcepts?.some(Boolean)) {
       throw new ApiError(
         400,
@@ -380,7 +411,11 @@ app.post("/", async (c) => {
     const generationId = crypto.randomUUID();
     let billingApplied = false;
     const persistenceTask = (async () => {
-      await billFlatUsage(billingContext, cost, admission?.reservation);
+      await billFlatUsage(
+        billingContext,
+        cost,
+        successfulAdmission.reservation,
+      );
       billingApplied = true;
       chargeSettled = true;
       await generationsService.create({
@@ -424,7 +459,7 @@ app.post("/", async (c) => {
     })().catch(async (error) => {
       // error-policy:J7 successful video billing/history persistence runs
       // outside the response; conservative settlement remains observable.
-      if (!billingApplied) await admission?.settleUnknown();
+      if (!billingApplied) await successfulAdmission.settleUnknown();
       logger.error("[GenerateVideo] Background persistence failed", {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -506,6 +541,42 @@ app.post("/", async (c) => {
           requestId: error.requestId,
           error:
             "Video generation is still running upstream. Credits stay reserved and settle automatically: charged if the video completes, refunded if it fails.",
+        },
+        202,
+      );
+    }
+    if (
+      error instanceof VideoGenerationSubmissionUnknownError &&
+      admission &&
+      !chargeSettled
+    ) {
+      const unknownAdmission = admission;
+      chargeSettled = true;
+      const conservativeSettlement = unknownAdmission
+        .settleUnknown()
+        .catch((settleError) => {
+          // error-policy:J7 the reservation sweep retains the same pinned
+          // provider/model identity if immediate conservative settlement fails.
+          logger.error(
+            "[GenerateVideo] Failed to settle an ambiguous provider submission",
+            {
+              error:
+                settleError instanceof Error
+                  ? settleError.message
+                  : String(settleError),
+            },
+          );
+        });
+      const executionCtx = getGenerativeExecutionContext(c);
+      if (executionCtx) executionCtx.waitUntil(conservativeSettlement);
+      else await conservativeSettlement;
+      return c.json(
+        {
+          success: false,
+          status: "submission_unknown",
+          requestId: activeBillingRequestId,
+          error:
+            "The provider may have accepted this video request, so no fallback was dispatched and the provider-specific reservation settles conservatively. This request is not safe to retry automatically.",
         },
         202,
       );

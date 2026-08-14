@@ -5,14 +5,23 @@
  * preservation, actual-provider persistence, and single-settlement billing.
  */
 
-import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import * as workersHonoAuthActual from "@/lib/auth/workers-hono-auth";
 import * as aiPricingActual from "@/lib/services/ai-pricing";
 import * as contentSafetyActual from "@/lib/services/content-safety";
 import * as creditsActual from "@/lib/services/credits";
 import * as generationsActual from "@/lib/services/generations";
 
-const falActual = require("@fal-ai/client") as Record<string, unknown>;
+const falActual = require("@fal-ai/client") as typeof import("@fal-ai/client");
+const { ApiError: FalApiError } = falActual;
 const originalFetch = globalThis.fetch;
 
 const ORG = "00000000-0000-4000-8000-0000000000aa";
@@ -107,7 +116,11 @@ afterAll(() => {
 
 type AppCtx = { set: (key: string, value: unknown) => void };
 
-function makeLedgerReservation(startBalance: number, hold: number) {
+function makeLedgerReservation(
+  startBalance: number,
+  hold: number,
+  reservationTransactionId = "11111111-1111-4111-8111-111111111111",
+) {
   let balance = startBalance - hold;
   let reconcileCalls = 0;
   let lastActual = Number.NaN;
@@ -124,7 +137,7 @@ function makeLedgerReservation(startBalance: number, hold: number) {
     },
     reservation: {
       reservedAmount: hold,
-      reservationTransactionId: "11111111-1111-4111-8111-111111111111",
+      reservationTransactionId,
       reconcile: async (actualCost: number) => {
         reconcileCalls++;
         lastActual = actualCost;
@@ -241,10 +254,27 @@ describe("generate-video — default provider fallback", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test("falls back from a terminal fal failure and settles once at the Atlas cost", async () => {
-    const ledger = makeLedgerReservation(100, FAL_COST);
-    reserve.mockResolvedValue(ledger.reservation);
-    subscribe.mockRejectedValue(new Error("fal unavailable"));
+  test("uses separate provider-priced reservations across a safe fallback", async () => {
+    const falLedger = makeLedgerReservation(
+      100,
+      FAL_COST,
+      "11111111-1111-4111-8111-111111111111",
+    );
+    const atlasLedger = makeLedgerReservation(
+      100,
+      ATLAS_COST,
+      "22222222-2222-4222-8222-222222222222",
+    );
+    reserve
+      .mockResolvedValueOnce(falLedger.reservation)
+      .mockResolvedValueOnce(atlasLedger.reservation);
+    subscribe.mockRejectedValue(
+      new FalApiError({
+        message: "invalid fal input",
+        status: 422,
+        body: undefined,
+      }),
+    );
     fetchMock.mockResolvedValue(atlasSuccess());
 
     const response = await post({
@@ -255,9 +285,23 @@ describe("generate-video — default provider fallback", () => {
     expect(response.status).toBe(200);
     expect(subscribe).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(ledger.reconcileCalls).toBe(1);
-    expect(ledger.lastActual).toBeCloseTo(ATLAS_COST, 10);
-    expect(ledger.balance).toBeCloseTo(ledger.startBalance - ATLAS_COST, 10);
+    expect(reserve).toHaveBeenCalledTimes(2);
+    expect(reserve.mock.calls[0]?.[0]).toMatchObject({
+      amount: FAL_COST,
+      model: "veo3",
+      provider: "fal",
+      billingSource: "fal",
+    });
+    expect(reserve.mock.calls[1]?.[0]).toMatchObject({
+      amount: ATLAS_COST,
+      model: "q3-turbo",
+      provider: "vidu",
+      billingSource: "atlascloud",
+    });
+    expect(falLedger.reconcileCalls).toBe(1);
+    expect(falLedger.lastActual).toBe(0);
+    expect(atlasLedger.reconcileCalls).toBe(1);
+    expect(atlasLedger.lastActual).toBeCloseTo(ATLAS_COST, 10);
     expect(generationsCreate.mock.calls[0]?.[0]).toMatchObject({
       model: ATLAS_MODEL,
       provider: "vidu",
@@ -265,13 +309,30 @@ describe("generate-video — default provider fallback", () => {
     });
   });
 
-  test("refunds once and reports failure when both providers fail terminally", async () => {
-    const ledger = makeLedgerReservation(100, FAL_COST);
-    reserve.mockResolvedValue(ledger.reservation);
-    subscribe.mockRejectedValue(new Error("fal unavailable"));
+  test("releases each attempt when both providers reject terminally", async () => {
+    const falLedger = makeLedgerReservation(
+      100,
+      FAL_COST,
+      "11111111-1111-4111-8111-111111111111",
+    );
+    const atlasLedger = makeLedgerReservation(
+      100,
+      ATLAS_COST,
+      "22222222-2222-4222-8222-222222222222",
+    );
+    reserve
+      .mockResolvedValueOnce(falLedger.reservation)
+      .mockResolvedValueOnce(atlasLedger.reservation);
+    subscribe.mockRejectedValue(
+      new FalApiError({
+        message: "invalid fal input",
+        status: 422,
+        body: undefined,
+      }),
+    );
     fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ message: "atlas unavailable" }), {
-        status: 503,
+      new Response(JSON.stringify({ message: "invalid atlas input" }), {
+        status: 422,
         headers: { "content-type": "application/json" },
       }),
     );
@@ -291,9 +352,34 @@ describe("generate-video — default provider fallback", () => {
         billingSource: "atlascloud",
       },
     });
+    expect(reserve).toHaveBeenCalledTimes(2);
+    expect(falLedger.reconcileCalls).toBe(1);
+    expect(falLedger.lastActual).toBe(0);
+    expect(atlasLedger.reconcileCalls).toBe(1);
+    expect(atlasLedger.lastActual).toBe(0);
+    expect(generationsCreate).not.toHaveBeenCalled();
+  });
+
+  test("does not dispatch Atlas when fal submission may have been accepted", async () => {
+    const ledger = makeLedgerReservation(100, FAL_COST);
+    reserve.mockResolvedValue(ledger.reservation);
+    subscribe.mockRejectedValue(new Error("connection reset after upload"));
+
+    const response = await post({
+      FAL_KEY: "fal-key",
+      ATLASCLOUD_API_KEY: "atlas-key",
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      success: false,
+      status: "submission_unknown",
+      requestId: expect.stringMatching(/^generate-video:[^:]+:0$/),
+    });
+    expect(reserve).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(ledger.reconcileCalls).toBe(1);
-    expect(ledger.lastActual).toBe(0);
-    expect(ledger.balance).toBeCloseTo(ledger.startBalance, 10);
+    expect(ledger.lastActual).toBeCloseTo(FAL_COST, 10);
     expect(generationsCreate).not.toHaveBeenCalled();
   });
 
@@ -322,6 +408,79 @@ describe("generate-video — default provider fallback", () => {
       provider: "fal",
       status: "pending",
       job_id: "fal-pending-1",
+    });
+  });
+
+  test("pins Atlas billing and recovery identity when fallback polling is ambiguous", async () => {
+    const falLedger = makeLedgerReservation(
+      100,
+      FAL_COST,
+      "11111111-1111-4111-8111-111111111111",
+    );
+    const atlasLedger = makeLedgerReservation(
+      100,
+      ATLAS_COST,
+      "22222222-2222-4222-8222-222222222222",
+    );
+    reserve
+      .mockResolvedValueOnce(falLedger.reservation)
+      .mockResolvedValueOnce(atlasLedger.reservation);
+    subscribe.mockRejectedValue(
+      new FalApiError({
+        message: "invalid fal input",
+        status: 422,
+        body: undefined,
+      }),
+    );
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: { id: "atlas-pending-1", status: "starting" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockRejectedValueOnce(new Error("atlas poll unavailable"));
+    const runTimerImmediately = ((handler: TimerHandler) => {
+      if (typeof handler === "function") handler();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(
+      runTimerImmediately,
+    );
+
+    const response = await (async () => {
+      try {
+        return await post({
+          FAL_KEY: "fal-key",
+          ATLASCLOUD_API_KEY: "atlas-key",
+        });
+      } finally {
+        timer.mockRestore();
+      }
+    })();
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      success: false,
+      status: "pending",
+      requestId: "atlas-pending-1",
+    });
+    expect(falLedger.reconcileCalls).toBe(1);
+    expect(falLedger.lastActual).toBe(0);
+    expect(atlasLedger.reconcileCalls).toBe(0);
+    expect(generationsCreate).toHaveBeenCalledTimes(1);
+    expect(generationsCreate.mock.calls[0]?.[0]).toMatchObject({
+      model: ATLAS_MODEL,
+      provider: "vidu",
+      status: "pending",
+      job_id: "atlas-pending-1",
+      metadata: {
+        reservation_transaction_id: "22222222-2222-4222-8222-222222222222",
+        billed_cost: ATLAS_COST,
+        billing_source: "atlascloud",
+      },
     });
   });
 });

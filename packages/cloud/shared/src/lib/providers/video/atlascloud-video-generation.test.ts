@@ -1,5 +1,5 @@
-// Exercises atlascloud video generation behavior with deterministic cloud-shared lib fixtures.
-import { afterEach, describe, expect, test } from "bun:test";
+/** Exercises Atlas Cloud video submission and reconciliation with deterministic fetch fixtures. */
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   atlasCloudVideoProvider,
   buildAtlasVideoInput,
@@ -7,6 +7,11 @@ import {
   generateAtlasCloudVideo,
   getAtlasCloudVideoJobStatus,
 } from "./atlascloud-video-generation";
+import {
+  VideoGenerationPendingError,
+  VideoGenerationSubmissionUnknownError,
+  VideoGenerationTerminalError,
+} from "./types";
 
 const originalFetch = globalThis.fetch;
 
@@ -129,6 +134,163 @@ describe("Atlas Cloud video provider", () => {
     ).rejects.toThrow("AI services are not configured on this deployment");
     expect(atlasCloudVideoProvider.isConfigured?.({})).toBe(false);
     expect(called).toBe(false);
+  });
+
+  test("classifies a definitive submit rejection as terminal", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ message: "invalid input" }), {
+        status: 422,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+
+    await expect(
+      generateAtlasCloudVideo({
+        model: "vidu/q3-turbo/text-to-video",
+        prompt: "a lighthouse",
+        apiKeys: { ATLASCLOUD_API_KEY: "atlas-key" },
+      }),
+    ).rejects.toBeInstanceOf(VideoGenerationTerminalError);
+  });
+
+  test("classifies submit transport failure as unknown, not terminal", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("connection reset after upload");
+    }) as typeof fetch;
+
+    await expect(
+      generateAtlasCloudVideo({
+        model: "vidu/q3-turbo/text-to-video",
+        prompt: "a lighthouse",
+        apiKeys: { ATLASCLOUD_API_KEY: "atlas-key" },
+      }),
+    ).rejects.toBeInstanceOf(VideoGenerationSubmissionUnknownError);
+  });
+
+  test("classifies an invalid successful submit response as unknown", async () => {
+    globalThis.fetch = (async () =>
+      new Response("not-json", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+
+    await expect(
+      generateAtlasCloudVideo({
+        model: "vidu/q3-turbo/text-to-video",
+        prompt: "a lighthouse",
+        apiKeys: { ATLASCLOUD_API_KEY: "atlas-key" },
+      }),
+    ).rejects.toBeInstanceOf(VideoGenerationSubmissionUnknownError);
+  });
+
+  test("classifies a submit server error as unknown", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ message: "gateway timeout" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+
+    await expect(
+      generateAtlasCloudVideo({
+        model: "vidu/q3-turbo/text-to-video",
+        prompt: "a lighthouse",
+        apiKeys: { ATLASCLOUD_API_KEY: "atlas-key" },
+      }),
+    ).rejects.toBeInstanceOf(VideoGenerationSubmissionUnknownError);
+  });
+
+  test("retains the Atlas prediction id when polling is unreachable", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      if (fetchCalls === 1) {
+        return new Response(
+          JSON.stringify({
+            data: { id: "atlas-prediction", status: "starting" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error("prediction status unavailable");
+    }) as typeof fetch;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === "function") handler();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+
+    try {
+      const error = await generateAtlasCloudVideo({
+        model: "vidu/q3-turbo/text-to-video",
+        prompt: "a lighthouse",
+        apiKeys: { ATLASCLOUD_API_KEY: "atlas-key" },
+      }).catch((caught) => caught);
+      expect(error).toBeInstanceOf(VideoGenerationPendingError);
+      expect((error as InstanceType<typeof VideoGenerationPendingError>).requestId).toBe(
+        "atlas-prediction",
+      );
+    } finally {
+      timer.mockRestore();
+    }
+  });
+
+  test("returns a pending error with the prediction id on poll timeout", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          data: { id: "atlas-prediction", status: "starting" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    const clock = spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(180_001);
+
+    try {
+      const error = await generateAtlasCloudVideo({
+        model: "vidu/q3-turbo/text-to-video",
+        prompt: "a lighthouse",
+        apiKeys: { ATLASCLOUD_API_KEY: "atlas-key" },
+      }).catch((caught) => caught);
+      expect(error).toBeInstanceOf(VideoGenerationPendingError);
+      expect((error as InstanceType<typeof VideoGenerationPendingError>).requestId).toBe(
+        "atlas-prediction",
+      );
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test("keeps a known prediction pending when its poll payload is invalid", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return fetchCalls === 1
+        ? new Response(
+            JSON.stringify({
+              data: { id: "atlas-prediction", status: "starting" },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          )
+        : new Response("not-json", {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+    }) as typeof fetch;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === "function") handler();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+
+    try {
+      const error = await generateAtlasCloudVideo({
+        model: "vidu/q3-turbo/text-to-video",
+        prompt: "a lighthouse",
+        apiKeys: { ATLASCLOUD_API_KEY: "atlas-key" },
+      }).catch((caught) => caught);
+      expect(error).toBeInstanceOf(VideoGenerationPendingError);
+      expect((error as InstanceType<typeof VideoGenerationPendingError>).requestId).toBe(
+        "atlas-prediction",
+      );
+    } finally {
+      timer.mockRestore();
+    }
   });
 
   test("reports Atlas job status success with normalized output", async () => {
