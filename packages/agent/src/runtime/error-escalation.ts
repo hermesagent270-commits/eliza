@@ -87,7 +87,13 @@ export function resolveWindowMs(runtime: IAgentRuntime): number {
       `Invalid ERROR_ESCALATION_WINDOW_MINUTES value ${JSON.stringify(raw)}: expected a positive plain-decimal number`,
     );
   }
-  return parsed * 60 * 1000;
+  const windowMs = parsed * 60 * 1000;
+  if (!Number.isSafeInteger(windowMs) || windowMs <= 0) {
+    throw new Error(
+      `Invalid ERROR_ESCALATION_WINDOW_MINUTES value ${JSON.stringify(raw)}: converted window must be a positive safe integer number of milliseconds`,
+    );
+  }
+  return windowMs;
 }
 
 /**
@@ -142,7 +148,7 @@ export function createErrorReportedEscalationHandler(
 export function registerErrorEscalation(runtime: IAgentRuntime): void {
   const threshold = resolveThreshold(runtime);
   const windowMs = resolveWindowMs(runtime);
-  const windowMinutes = Math.round(windowMs / 60000);
+  const windowMinutes = windowMs / 60000;
   const tracker = new ErrorEscalationTracker(threshold, windowMs);
   runtime.registerEvent(
     EventType.ERROR_REPORTED,

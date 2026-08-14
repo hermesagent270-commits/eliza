@@ -166,6 +166,10 @@ describe("ERROR_REPORTED escalation handler", () => {
 });
 
 describe("error-escalation configuration", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   function runtimeWithSettings(
     settings: Record<string, string | undefined>,
   ): IAgentRuntime {
@@ -231,20 +235,27 @@ describe("error-escalation configuration", () => {
     },
   );
 
-  it.each(["10abc", "0", "-5", "abc", "Infinity", "NaN"])(
-    "rejects invalid window %s",
-    (configured) => {
-      expect(() =>
-        resolveWindowMs(
-          runtimeWithSettings({ ERROR_ESCALATION_WINDOW_MINUTES: configured }),
-        ),
-      ).toThrow(
-        new RegExp(
-          `ERROR_ESCALATION_WINDOW_MINUTES.*${configured.replace("-", "\\-")}`,
-        ),
-      );
-    },
-  );
+  it.each([
+    "10abc",
+    "0",
+    "-5",
+    "abc",
+    "Infinity",
+    "NaN",
+    "150119987579.01656",
+    "9".repeat(308),
+    "0.000001",
+  ])("rejects invalid window %s", (configured) => {
+    expect(() =>
+      resolveWindowMs(
+        runtimeWithSettings({ ERROR_ESCALATION_WINDOW_MINUTES: configured }),
+      ),
+    ).toThrow(
+      new RegExp(
+        `ERROR_ESCALATION_WINDOW_MINUTES.*${configured.replace("-", "\\-")}`,
+      ),
+    );
+  });
 
   it("propagates invalid configuration during registration", () => {
     const runtime = {
@@ -257,6 +268,49 @@ describe("error-escalation configuration", () => {
       /ERROR_ESCALATION_THRESHOLD.*3oops/,
     );
     expect(runtime.registerEvent).not.toHaveBeenCalled();
+  });
+
+  it("fails registration before registerEvent for an invalid window", () => {
+    const runtime = {
+      getSetting: (key: string) =>
+        key === "ERROR_ESCALATION_THRESHOLD"
+          ? "3"
+          : key === "ERROR_ESCALATION_WINDOW_MINUTES"
+            ? "0.000001"
+            : undefined,
+      registerEvent: vi.fn(),
+    } as unknown as IAgentRuntime;
+
+    expect(() => registerErrorEscalation(runtime)).toThrow(
+      /ERROR_ESCALATION_WINDOW_MINUTES.*positive safe integer number of milliseconds/,
+    );
+    expect(runtime.registerEvent).not.toHaveBeenCalled();
+  });
+
+  it("reports a fractional configured window truthfully through the registered handler", async () => {
+    const registerEvent = vi.fn();
+    const runtime = {
+      getSetting: (key: string) =>
+        key === "ERROR_ESCALATION_THRESHOLD"
+          ? "1"
+          : key === "ERROR_ESCALATION_WINDOW_MINUTES"
+            ? "0.5"
+            : undefined,
+      registerEvent,
+    } as unknown as IAgentRuntime;
+    const escalation = vi
+      .spyOn(EscalationService, "startEscalation")
+      .mockResolvedValue({} as never);
+
+    registerErrorEscalation(runtime);
+    expect(registerEvent).toHaveBeenCalledTimes(1);
+    const handler = registerEvent.mock.calls[0]?.[1] as (
+      event: ErrorReportedPayload,
+    ) => Promise<void>;
+    await handler(payload("FRACTIONAL_WINDOW"));
+
+    expect(escalation).toHaveBeenCalledTimes(1);
+    expect(escalation.mock.calls[0]?.[1]).toContain("within 0.5m");
   });
 });
 
