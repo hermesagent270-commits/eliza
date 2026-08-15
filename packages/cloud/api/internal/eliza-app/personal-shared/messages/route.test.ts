@@ -14,6 +14,11 @@ const findOrCreateByPhone = mock(async () => ({
   organization: { id: "00000000-0000-4000-8000-000000000011" },
   isNew: true,
 }));
+const findOrCreateByDiscordId = mock(async () => ({
+  user: { id: "00000000-0000-4000-8000-000000000002" },
+  organization: { id: "00000000-0000-4000-8000-000000000001" },
+  isNew: false,
+}));
 const sharedRestMessageSend = mock(async () => ({ text: "hello from Eliza" }));
 const runOnboardingChat = mock(async (_input: OnboardingChatInput) => ({
   loginUrl:
@@ -67,13 +72,50 @@ const bridge = mock(
     result: { text: "hello from Dedicated" },
   }),
 );
+type ImportReceipt = {
+  complete: true;
+  sourceMessageCount: number;
+  inserted: number;
+  skipped: number;
+};
+const importCanonicalConversation = mock(
+  async (
+    _agentId: string,
+    _orgId: string,
+    _conversationId: string,
+    _messages: Array<{
+      sourceId: string;
+      role: "user" | "assistant";
+      text: string;
+      timestamp?: number;
+    }>,
+  ): Promise<ImportReceipt | null> => ({
+    complete: true,
+    sourceMessageCount: 2,
+    inserted: 2,
+    skipped: 0,
+  }),
+);
+const coordinateSharedHistory = mock(async () => [
+  { id: "source-1", role: "user" as const, content: "before", createdAt: 100 },
+  {
+    id: "source-2",
+    role: "assistant" as const,
+    content: "after",
+    createdAt: 101,
+  },
+]);
 const namespace = {
   getByName: mock(() => ({ fetch: mock(async () => new Response()) })),
 };
 const runtimeExecutionCtx = { waitUntil() {} };
 
 mock.module("@/lib/services/eliza-app", () => ({
-  elizaAppUserService: { findOrCreateByPhone, findOrCreateByTelegram },
+  elizaAppUserService: {
+    findOrCreateByDiscordId,
+    findOrCreateByPhone,
+    findOrCreateByTelegram,
+  },
 }));
 mock.module("@/lib/services/shared-runtime/shared-rest-adapter", () => ({
   sharedRestMessageSend,
@@ -98,7 +140,10 @@ mock.module("@/lib/services/provisioning-jobs", () => ({
   },
 }));
 mock.module("@/lib/services/eliza-sandbox", () => ({
-  elizaSandboxService: { bridge },
+  elizaSandboxService: { bridge, importCanonicalConversation },
+}));
+mock.module("@/lib/services/shared-runtime/conversation-coordinator", () => ({
+  coordinateSharedHistory,
 }));
 mock.module("@/lib/services/shared-runtime/resolve-shared-agent", () => ({
   resolveSharedRuntimeWorkerRequestContext: () => ({
@@ -121,6 +166,7 @@ function request(body: unknown, authorization = "Bearer test-secret") {
     {
       INTERNAL_SECRET: "test-secret",
       SHARED_RUNTIME_CONVERSATIONS: namespace,
+      WHISPER_STT_URL: "https://whisper.test",
     } as never,
     executionCtx as never,
   );
@@ -145,12 +191,15 @@ const validPhone = {
 describe("personal Shared messaging deliveries", () => {
   beforeEach(() => {
     findOrCreateByPhone.mockClear();
+    findOrCreateByDiscordId.mockClear();
     activeTarget = null;
     findOrCreateByTelegram.mockClear();
     findActivePersonalDedicatedTarget.mockClear();
     sharedRestMessageSend.mockClear();
     runOnboardingChat.mockClear();
     bridge.mockClear();
+    importCanonicalConversation.mockClear();
+    coordinateSharedHistory.mockClear();
     enqueueAgentResumeOnce.mockClear();
     enqueueAgentWakeOnce.mockClear();
     triggerImmediate.mockClear();
@@ -190,6 +239,68 @@ describe("personal Shared messaging deliveries", () => {
       "telegram:eliza:42",
       "platform",
     );
+  });
+
+  test("transcribes a Telegram voice note before the Shared turn", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async (input, init) => {
+      const outbound = new Request(input, init);
+      expect(outbound.url).toBe("https://whisper.test/v1/audio/transcriptions");
+      const form = await outbound.formData();
+      const file = form.get("file");
+      expect(file).toBeInstanceOf(File);
+      expect((file as File).type).toBe("audio/ogg");
+      return Response.json({ text: "remember the red bicycle" });
+    }) as unknown as typeof fetch;
+    const bytes = Buffer.from("OggSvoice-note");
+    try {
+      const response = await request({
+        ...valid,
+        message: undefined,
+        voiceNote: {
+          bytesBase64: bytes.toString("base64"),
+          mimeType: "audio/ogg",
+          filename: "telegram-42.ogg",
+          sizeBytes: bytes.length,
+          durationSeconds: 4,
+        },
+      });
+
+      expect(response.status).toBe(200);
+      expect(sharedRestMessageSend).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringMatching(/^personal:/),
+        "remember the red bicycle",
+        "Eliza",
+        runtimeExecutionCtx,
+        namespace,
+        "telegram:eliza:42",
+        "platform",
+      );
+      await expect(response.json()).resolves.toMatchObject({
+        data: { reply: "hello from Eliza" },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("rejects a forged voice payload before identity, storage, or inference", async () => {
+    const response = await request({
+      ...valid,
+      message: undefined,
+      voiceNote: {
+        bytesBase64: Buffer.from("not ogg").toString("base64"),
+        mimeType: "audio/ogg",
+        filename: "telegram-42.ogg",
+        sizeBytes: 7,
+        durationSeconds: 4,
+      },
+    });
+
+    expect(response.status).toBe(400);
+    expect(findOrCreateByTelegram).not.toHaveBeenCalled();
+    expect(sharedRestMessageSend).not.toHaveBeenCalled();
   });
 
   test("issues an account-bound Telegram claim without entering runtime or provisioning", async () => {
@@ -289,6 +400,38 @@ describe("personal Shared messaging deliveries", () => {
       runtimeExecutionCtx,
       namespace,
       "blooio:eliza:message-42",
+      "platform",
+    );
+  });
+
+  test("routes a linked Discord DM through the same personal room", async () => {
+    const response = await request({
+      platform: "discord",
+      discordUserId: "123456789012345678",
+      discordUsername: "shaw",
+      displayName: "Shaw",
+      avatarUrl: "https://cdn.discordapp.com/avatar.png",
+      messageId: "discord:message-42",
+      message: "continue our conversation",
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      data: { identity: { id: string } };
+    };
+    expect(findOrCreateByDiscordId).toHaveBeenCalledWith("123456789012345678", {
+      username: "shaw",
+      globalName: "Shaw",
+      avatarUrl: "https://cdn.discordapp.com/avatar.png",
+    });
+    expect(sharedRestMessageSend).toHaveBeenCalledWith(
+      expect.objectContaining({ id: body.data.identity.id }),
+      body.data.identity.id,
+      "continue our conversation",
+      "Eliza",
+      runtimeExecutionCtx,
+      namespace,
+      "discord:message-42",
       "platform",
     );
   });
@@ -433,6 +576,90 @@ describe("personal Shared messaging deliveries", () => {
       code: "service_unavailable",
     });
     expect(sharedRestMessageSend).not.toHaveBeenCalled();
+  });
+
+  test("repairs a missing cutover conversation from authoritative Shared history", async () => {
+    activeTarget = {
+      id: "00000000-0000-4000-8000-000000000020",
+      status: "running",
+    };
+    bridge
+      .mockImplementationOnce(async () => ({
+        jsonrpc: "2.0" as const,
+        id: "telegram:eliza:42",
+        error: { code: -32_000, message: "Bridge returned HTTP 404" },
+      }))
+      .mockImplementationOnce(async () => ({
+        jsonrpc: "2.0" as const,
+        id: "telegram:eliza:42",
+        result: { text: "repaired Dedicated reply" },
+      }));
+
+    const response = await request(valid);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      data: { reply: "repaired Dedicated reply" },
+    });
+    expect(coordinateSharedHistory).toHaveBeenCalledWith(
+      expect.stringMatching(/^personal:/),
+      expect.stringMatching(/^personal:/),
+      { namespace },
+    );
+    expect(importCanonicalConversation).toHaveBeenCalledWith(
+      "00000000-0000-4000-8000-000000000020",
+      "00000000-0000-4000-8000-000000000001",
+      expect.stringMatching(/^personal:/),
+      [
+        { sourceId: "source-1", role: "user", text: "before", timestamp: 100 },
+        {
+          sourceId: "source-2",
+          role: "assistant",
+          text: "after",
+          timestamp: 101,
+        },
+      ],
+    );
+    expect(bridge).toHaveBeenCalledTimes(2);
+    expect(sharedRestMessageSend).not.toHaveBeenCalled();
+  });
+
+  test("recreates an empty canonical conversation when history import is unavailable", async () => {
+    activeTarget = {
+      id: "00000000-0000-4000-8000-000000000020",
+      status: "running",
+    };
+    bridge
+      .mockImplementationOnce(async () => ({
+        jsonrpc: "2.0" as const,
+        id: "telegram:eliza:42",
+        error: { code: -32_000, message: "Bridge returned HTTP 404" },
+      }))
+      .mockImplementationOnce(async () => ({
+        jsonrpc: "2.0" as const,
+        id: "telegram:eliza:42",
+        result: { text: "available Dedicated reply" },
+      }));
+    importCanonicalConversation
+      .mockImplementationOnce(async () => null)
+      .mockImplementationOnce(async () => ({
+        complete: true as const,
+        sourceMessageCount: 0,
+        inserted: 0,
+        skipped: 0,
+      }));
+
+    const response = await request(valid);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      data: { reply: "available Dedicated reply" },
+    });
+    expect(importCanonicalConversation).toHaveBeenCalledTimes(2);
+    expect(importCanonicalConversation.mock.calls[1]?.[3]).toEqual([]);
+    expect(bridge).toHaveBeenCalledTimes(2);
   });
 
   test.each([
