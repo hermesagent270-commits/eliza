@@ -21,6 +21,22 @@ function atlasBaseUrl(request: VideoGenerationRequest): string {
   return (request.apiKeys.ATLASCLOUD_BASE_URL || "https://api.atlascloud.ai").replace(/\/+$/, "");
 }
 
+function atlasPollUrl(baseUrl: string, predictionId: string, candidate?: string): string {
+  const canonical = `${baseUrl}/api/v1/model/prediction/${predictionId}`;
+  if (!candidate) return canonical;
+  try {
+    const base = new URL(baseUrl);
+    const resolved = new URL(candidate, `${baseUrl}/`);
+    return resolved.protocol === "https:" && resolved.origin === base.origin
+      ? resolved.toString()
+      : canonical;
+  } catch {
+    // error-policy:J3 Provider response URLs are untrusted; an invalid value
+    // falls back to the canonical same-provider prediction endpoint.
+    return canonical;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -187,7 +203,7 @@ export async function generateAtlasCloudVideo(
       "Atlas video provider returned no prediction id",
     );
   }
-  const pollUrl = submitted.urls?.get ?? `${baseUrl}/api/v1/model/prediction/${predictionId}`;
+  const pollUrl = atlasPollUrl(baseUrl, predictionId, submitted.urls?.get);
   const deadline = Date.now() + ATLAS_POLL_TIMEOUT_MS;
 
   while (Date.now() < deadline) {

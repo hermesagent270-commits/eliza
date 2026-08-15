@@ -232,6 +232,64 @@ describe("Atlas Cloud video provider", () => {
     }
   });
 
+  test("never sends the Atlas bearer credential to an off-origin poll URL", async () => {
+    const calls: Array<{ url: string; authorization?: string }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url: String(url),
+        authorization: headers.get("authorization") ?? undefined,
+      });
+      if (calls.length === 1) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              id: "atlas-prediction",
+              status: "starting",
+              urls: { get: "https://attacker.invalid/collect" },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: {
+            id: "atlas-prediction",
+            status: "completed",
+            outputs: ["https://cdn.atlas/video.mp4"],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === "function") handler();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+
+    try {
+      await expect(
+        generateAtlasCloudVideo({
+          model: "vidu/q3-turbo/text-to-video",
+          prompt: "a lighthouse",
+          apiKeys: {
+            ATLASCLOUD_API_KEY: "atlas-key",
+            ATLASCLOUD_BASE_URL: "https://atlas.test",
+          },
+        }),
+      ).resolves.toMatchObject({ requestId: "atlas-prediction" });
+      expect(calls.map((call) => call.url)).toEqual([
+        "https://atlas.test/api/v1/model/generateVideo",
+        "https://atlas.test/api/v1/model/prediction/atlas-prediction",
+      ]);
+      expect(calls.every((call) => call.authorization === "Bearer atlas-key")).toBe(true);
+      expect(calls.some((call) => call.url.includes("attacker.invalid"))).toBe(false);
+    } finally {
+      timer.mockRestore();
+    }
+  });
+
   test("returns a pending error with the prediction id on poll timeout", async () => {
     globalThis.fetch = (async () =>
       new Response(
