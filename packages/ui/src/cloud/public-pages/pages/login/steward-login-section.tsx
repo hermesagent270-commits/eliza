@@ -396,8 +396,17 @@ export default function StewardLoginSection() {
   const [externalSuccessDestination, setExternalSuccessDestination] = useState<
     string | null
   >(null);
+  // The one in-flight shared-session recovery, keyed by the challenged email
+  // and owning its own AbortController. Keying prevents an abandoned email-A
+  // challenge's recovery from being handed to a later email-B challenge; the
+  // owned controller lets challenge replacement/cancel abort the network work.
   const sharedSessionRecoveryRef = useRef<
-    ReturnType<typeof recoverStewardEmailSessionViaCookie> | undefined
+    | {
+        email: string;
+        controller: AbortController;
+        promise: ReturnType<typeof recoverStewardEmailSessionViaCookie>;
+      }
+    | undefined
   >(undefined);
   // Detected once, synchronously, BEFORE the callback-consuming effect below
   // strips `?code`/`#token` from the URL. While this is true the section shows a
@@ -428,22 +437,51 @@ export default function StewardLoginSection() {
   const showPasskey =
     providers.passkey !== false && passkeyCapability?.usable === true;
 
-  const recoverSharedEmailSession = useCallback(
-    (signal: AbortSignal) => {
-      const pending = sharedSessionRecoveryRef.current;
-      if (pending) return pending;
+  const abortSharedEmailSessionRecovery = useCallback(() => {
+    const pending = sharedSessionRecoveryRef.current;
+    if (!pending) return;
+    sharedSessionRecoveryRef.current = undefined;
+    pending.controller.abort();
+  }, []);
 
-      const recovery: ReturnType<typeof recoverStewardEmailSessionViaCookie> =
-        recoverStewardEmailSessionViaCookie(email, { signal }).finally(() => {
-          if (sharedSessionRecoveryRef.current === recovery) {
-            sharedSessionRecoveryRef.current = undefined;
-          }
-        });
-      sharedSessionRecoveryRef.current = recovery;
-      return recovery;
-    },
-    [email],
-  );
+  const recoverSharedEmailSession = useCallback(() => {
+    const expected = email.trim().toLowerCase();
+    const pending = sharedSessionRecoveryRef.current;
+    if (pending?.email === expected && !pending.controller.signal.aborted) {
+      return pending.promise;
+    }
+    // A recovery still pending for a different (abandoned) challenge must
+    // never satisfy the current one — replace it with a freshly keyed run.
+    pending?.controller.abort();
+
+    const controller = new AbortController();
+    const promise = recoverStewardEmailSessionViaCookie(email, {
+      signal: controller.signal,
+    })
+      .then((session) => (controller.signal.aborted ? null : session))
+      .finally(() => {
+        if (sharedSessionRecoveryRef.current?.controller === controller) {
+          sharedSessionRecoveryRef.current = undefined;
+        }
+      });
+    sharedSessionRecoveryRef.current = { email: expected, controller, promise };
+    return promise;
+  }, [email]);
+
+  // Challenge lifecycle owns the recovery: leaving the email-sent step,
+  // switching emails, replacing the challenge (resend), or unmounting aborts
+  // the in-flight recovery instead of letting it linger for a later challenge.
+  const activeEmailChallengeKey =
+    step === "email-sent"
+      ? `${email.trim().toLowerCase()}|${emailChallenge?.challengeId ?? ""}`
+      : null;
+  useEffect(() => {
+    if (activeEmailChallengeKey === null) {
+      abortSharedEmailSessionRecovery();
+      return;
+    }
+    return () => abortSharedEmailSessionRecovery();
+  }, [abortSharedEmailSessionRecovery, activeEmailChallengeKey]);
 
   useEffect(() => {
     if (PLAYWRIGHT_TEST_AUTH_ENABLED) {
@@ -617,7 +655,6 @@ export default function StewardLoginSection() {
     const { challengeId, pollSecret } = emailChallenge;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const recoveryAbortController = new AbortController();
 
     const poll = async () => {
       try {
@@ -630,9 +667,7 @@ export default function StewardLoginSection() {
         const mapped = mapChallengeStatus(status);
         if (mapped === "approved") {
           try {
-            const recovered = await recoverSharedEmailSession(
-              recoveryAbortController.signal,
-            );
+            const recovered = await recoverSharedEmailSession();
             if (cancelled) return;
             if (recovered) {
               if (recovered.token) {
@@ -684,7 +719,6 @@ export default function StewardLoginSection() {
     timer = setTimeout(poll, EMAIL_STATUS_POLL_MS);
     return () => {
       cancelled = true;
-      recoveryAbortController.abort();
       if (timer) clearTimeout(timer);
     };
   }, [
@@ -699,13 +733,10 @@ export default function StewardLoginSection() {
   useEffect(() => {
     if (step !== "email-sent" || !email.trim()) return;
     let cancelled = false;
-    const recoveryAbortController = new AbortController();
     const unsubscribe = subscribeStewardEmailLoginComplete(email, (message) => {
       void (async () => {
         try {
-          const recovered = await recoverSharedEmailSession(
-            recoveryAbortController.signal,
-          );
+          const recovered = await recoverSharedEmailSession();
           if (cancelled) return;
           if (!recovered) {
             setEmailCheckState("approved");
@@ -739,7 +770,6 @@ export default function StewardLoginSection() {
     });
     return () => {
       cancelled = true;
-      recoveryAbortController.abort();
       unsubscribe();
     };
   }, [email, recoverSharedEmailSession, step]);

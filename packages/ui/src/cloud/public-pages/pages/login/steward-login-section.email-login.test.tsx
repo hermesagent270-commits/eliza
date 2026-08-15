@@ -242,6 +242,69 @@ describe("StewardLoginSection email magic-link companion code", () => {
     expect(screen.queryByLabelText("Six-digit code")).toBeNull();
   });
 
+  it("aborts an abandoned challenge's recovery and never hands it to a later email", async () => {
+    emailLoginSpies.poll.mockResolvedValue("consumed");
+    const pendingRecoveries: Array<(value: { ok: true } | null) => void> = [];
+    sessionSpies.recoverEmail.mockImplementation(
+      () =>
+        new Promise<{ ok: true } | null>((resolve) => {
+          pendingRecoveries.push(resolve);
+        }),
+    );
+    renderSection();
+    await startEmailLogin();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(sessionSpies.recoverEmail).toHaveBeenCalledWith(
+      "person@example.com",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    const emailASignal = sessionSpies.recoverEmail.mock.calls[0]?.[1]
+      ?.signal as AbortSignal;
+
+    // Abandon the email-A challenge while its recovery is still pending.
+    fireEvent.click(screen.getByRole("button", { name: /Back to login/i }));
+    expect(emailASignal.aborted).toBe(true);
+
+    // Start a fresh challenge for a different account.
+    emailLoginSpies.start.mockResolvedValue({
+      expiresAt: Date.now() + 600_000,
+      challengeId: "challenge-2",
+      pollSecret: "poll-secret-2",
+    });
+    const input = await screen.findByPlaceholderText("you@example.com");
+    fireEvent.change(input, { target: { value: "other@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: /Magic Link/i }));
+    await screen.findByLabelText("Six-digit code");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+
+    expect(sessionSpies.recoverEmail).toHaveBeenCalledTimes(2);
+    expect(sessionSpies.recoverEmail).toHaveBeenLastCalledWith(
+      "other@example.com",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    const emailBSignal = sessionSpies.recoverEmail.mock.calls[1]?.[1]
+      ?.signal as AbortSignal;
+    expect(emailBSignal.aborted).toBe(false);
+
+    // The abandoned email-A recovery resolving late must not sign email B in.
+    await act(async () => {
+      pendingRecoveries[0]?.({ ok: true });
+    });
+    expect(screen.queryByText("Signed in")).toBeNull();
+    expect(screen.getByLabelText("Six-digit code")).toBeTruthy();
+
+    // Only email B's own keyed recovery completes the waiting tab.
+    await act(async () => {
+      pendingRecoveries[1]?.({ ok: true });
+    });
+    expect(await screen.findByText("Signed in")).toBeTruthy();
+  });
+
   it("bounds consumed-link cookie waiting and keeps resend recovery visible", async () => {
     emailLoginSpies.poll.mockResolvedValue("consumed");
     sessionSpies.recoverEmail.mockResolvedValue(null);
