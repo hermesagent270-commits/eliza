@@ -26,7 +26,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -1575,20 +1574,18 @@ function ViewRouter({
     );
   }
 
-  // Cache the rendered view node per activeViewId so an exiting view can render
-  // its exit minimize animation during its 180ms transition back to desktop.
-  const cachedViewsRef = useRef<Map<string, ReactNode>>(new Map());
-  if (view != null) {
-    cachedViewsRef.current.set(activeViewId, <LazyViewBoundary>{view}</LazyViewBoundary>);
-  }
-
+  // The keep-alive host wraps the active view in a per-view ViewErrorBoundary +
+  // ViewTelemetryProfiler + ViewLifecycleSlot and drives the lifecycle
+  // controller (pause on app-background / tab-hidden / memory-pressure). With
+  // the default unmount-on-hide policy the host mounts exactly the active view —
+  // behaviorally identical to the prior single-branch ViewRouter.
   return (
     <KeepAliveViewHost
       activeViewId={activeViewId}
       renderView={(viewId) =>
-        viewId === activeViewId
-          ? <LazyViewBoundary>{view}</LazyViewBoundary>
-          : cachedViewsRef.current.get(viewId) ?? null
+        viewId === activeViewId ? (
+          <LazyViewBoundary>{view}</LazyViewBoundary>
+        ) : null
       }
     />
   );

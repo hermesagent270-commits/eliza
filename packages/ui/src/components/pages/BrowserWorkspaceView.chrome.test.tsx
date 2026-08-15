@@ -84,6 +84,7 @@ vi.mock("../../api", async (importOriginal) => {
 });
 
 import { client } from "../../api";
+import { shellHistory } from "../../surface-realm-channel";
 import { BrowserWorkspaceView } from "./BrowserWorkspaceView";
 import {
   BROWSER_WALLET_READY_TYPE,
@@ -194,9 +195,28 @@ describe("BrowserWorkspaceView fullscreen chrome (Notes/Calendar parity)", () =>
       toolbar.contains(screen.getByTestId("browser-workspace-address-input")),
     ).toBe(true);
     // The top-left back button lives inside the floating toolbar.
-    expect(
-      screen.getByRole("button", { name: "Back to launcher" }),
-    ).not.toBeNull();
+    const back = screen.getByRole("button", { name: "Back to launcher" });
+    expect(toolbar.contains(back)).toBe(true);
+    // 44px minimum hit target on the shared ViewBackButton primitive.
+    expect(back.className).toMatch(/(?:^|\s)h-11(?:\s|$)/);
+  });
+
+  it("invokes launcher navigation once from the toolbar back button", async () => {
+    const pushState = vi
+      .spyOn(shellHistory, "pushState")
+      .mockImplementation(() => {});
+    try {
+      render(<BrowserWorkspaceView />);
+      expect(await screen.findByText("No page open")).not.toBeNull();
+      const toolbar = screen.getByTestId("browser-workspace-toolbar");
+      const back = screen.getByRole("button", { name: "Back to launcher" });
+      expect(toolbar.contains(back)).toBe(true);
+      fireEvent.click(back);
+      expect(pushState).toHaveBeenCalledTimes(1);
+      expect(pushState).toHaveBeenCalledWith(null, "", "/views");
+    } finally {
+      pushState.mockRestore();
+    }
   });
 
   it("reserves the measured resting chat footprint and safe-area stack from the page viewport", async () => {
