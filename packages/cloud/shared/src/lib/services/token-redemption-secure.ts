@@ -1313,12 +1313,16 @@ export class SecureTokenRedemptionService {
    * exponent (`1e2`), hexadecimal (`0x10`), sign-prefixed (`+1`),
    * whitespace-padded (`" 1 "`), leading-zero, negative, non-finite, and
    * unsafe-integer shapes are corrupt and fail closed to manual review
-   * instead of being Number-coerced into a plausible count (#19948).
+   * instead of being Number-coerced into a plausible count (#19948). Numeric
+   * and bigint driver values are accepted only when safely representable.
    */
   private parseFraudCountAggregate(value: unknown): number | null {
     if (value === null || value === undefined) return null;
     if (typeof value === "number") {
       return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    }
+    if (typeof value === "bigint") {
+      return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
     }
     if (typeof value !== "string") return null;
     if (!/^(?:0|[1-9][0-9]*)$/.test(value)) return null;

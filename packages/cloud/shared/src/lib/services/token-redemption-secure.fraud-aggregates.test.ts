@@ -193,6 +193,40 @@ describe("checkFraudPatterns fail-closed aggregates", () => {
     expect(result.flagged).toBe(false);
   });
 
+  test("bigint canonical integer COUNT stays accepted", async () => {
+    executeResults = [{ rows: [{ count: 5n, total: "100.00" }] }];
+    const result = await callCheckFraudPatterns("app-1", 500);
+    expect(result.flagged).toBe(true);
+    expect(result.requiresReview).toBe(true);
+    expect(result.warning).toContain("within last hour");
+  });
+
+  test("bigint zero shared-address user_count stays accepted (no flag)", async () => {
+    executeResults = [{ rows: [{ user_count: 0n }] }];
+    const result = await callCheckFraudPatterns(undefined, 500, "0xshared");
+    expect(result.flagged).toBe(false);
+  });
+
+  test.each([-1n, BigInt(Number.MAX_SAFE_INTEGER) + 1n])(
+    "REGRESSION: impossible bigint recent-earnings COUNT %p fails closed to review",
+    async (count) => {
+      executeResults = [{ rows: [{ count, total: "100.00" }] }];
+      const result = await callCheckFraudPatterns("app-1", 500);
+      expect(result).toMatchObject({ flagged: true, requiresReview: true });
+      expect(result.warning).toContain("corrupt");
+    },
+  );
+
+  test.each([-1n, BigInt(Number.MAX_SAFE_INTEGER) + 1n])(
+    "REGRESSION: impossible bigint shared-address user_count %p fails closed to review",
+    async (userCount) => {
+      executeResults = [{ rows: [{ user_count: userCount }] }];
+      const result = await callCheckFraudPatterns(undefined, 500, "0xshared");
+      expect(result).toMatchObject({ flagged: true, requiresReview: true });
+      expect(result.warning).toContain("corrupt");
+    },
+  );
+
   // #19948 (review): numeric driver values must hit the same fail-closed
   // contract on both COUNT decision paths — the parser cannot trust the
   // runtime type any more than the wire format.
