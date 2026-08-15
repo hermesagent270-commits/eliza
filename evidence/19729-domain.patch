@@ -1,0 +1,313 @@
+From 36bb4d6fbc1091d4759c253fb9c4ee4a9e5805e8 Mon Sep 17 00:00:00 2001
+From: TrapLord <dev@intelsignal.xyz>
+Date: Sat, 15 Aug 2026 02:17:41 +0000
+Subject: [PATCH] fix(core): report failed tool handoffs honestly
+
+Require accepted async handoff results before retaining progress acknowledgements and preserve verified user-facing failure outcomes when planner prose is absent.
+
+AI provider/model: openai / gpt-5.6-sol
+
+Client / agent tooling: Hermes Agent
+
+Attribution status: self-reported
+---
+ .../message.answerless-tool-turn.test.ts      |  60 ++++++++++
+ .../message.preserved-tool-result.test.ts     |  24 +++-
+ packages/core/src/services/message.ts         | 107 ++++++++++++++----
+ packages/core/src/types/components.ts         |   9 +-
+ 4 files changed, 174 insertions(+), 26 deletions(-)
+
+diff --git a/packages/core/src/services/message.answerless-tool-turn.test.ts b/packages/core/src/services/message.answerless-tool-turn.test.ts
+index 87fbf3d01..5432f4b87 100644
+--- a/packages/core/src/services/message.answerless-tool-turn.test.ts
++++ b/packages/core/src/services/message.answerless-tool-turn.test.ts
+@@ -326,6 +326,66 @@ describe("answerless tool turn", () => {
+ 		expect(result.responseContent?.text).toBe(STAGE_ONE_ACK);
+ 	});
+ 
++	it("does not keep the ack when an asyncHandoff spawn fails to accept", async () => {
++		const harness = await createHarness({
++			actions: [
++				{
++					name: "LOOKUP",
++					asyncHandoff: true,
++					result: {
++						success: false,
++						text: "spawn rejected: no coding backend available",
++						error: "no coding backend available",
++					},
++				},
++			],
++			plannerToolNames: ["LOOKUP"],
++			evaluatorScript: [EVALUATOR_CONTINUE],
++		});
++
++		const result = await runTurn(harness, "build me the thing");
++
++		// A failed spawn shares the action name/flag but no work continues —
++		// shipping "On it." would claim a handoff that never started.
++		const delivered = visibleTexts(harness.callbacks);
++		expect(delivered).toEqual([NO_REPORTABLE_TOOL_OUTCOME_MESSAGE]);
++		expect(delivered).not.toContain(STAGE_ONE_ACK);
++		expect(result.responseContent?.text).toBe(
++			NO_REPORTABLE_TOOL_OUTCOME_MESSAGE,
++		);
++	});
++
++	it("delivers a failed sync tool's userFacingText instead of the ack or generic no-result line", async () => {
++		const failureFacing =
++			"Couldn't open bot.log: permission denied on the workspace path.";
++		const harness = await createHarness({
++			actions: [
++				{
++					name: "LOOKUP",
++					result: {
++						success: false,
++						text: DIAGNOSTIC,
++						userFacingText: failureFacing,
++						verifiedUserFacing: true,
++					},
++				},
++			],
++			plannerToolNames: ["LOOKUP"],
++			evaluatorScript: [EVALUATOR_CONTINUE],
++		});
++
++		const result = await runTurn(
++			harness,
++			"read me the last few lines of the bot log",
++		);
++
++		const delivered = visibleTexts(harness.callbacks);
++		expect(delivered).toEqual([failureFacing]);
++		expect(delivered).not.toContain(STAGE_ONE_ACK);
++		expect(delivered).not.toContain(NO_REPORTABLE_TOOL_OUTCOME_MESSAGE);
++		expect(result.responseContent?.text).toBe(failureFacing);
++	});
++
+ 	it("adds no trailing ack when an action already delivered the outcome", async () => {
+ 		const harness = await createHarness({
+ 			actions: [
+diff --git a/packages/core/src/services/message.preserved-tool-result.test.ts b/packages/core/src/services/message.preserved-tool-result.test.ts
+index c4a356d77..6ff55add0 100644
+--- a/packages/core/src/services/message.preserved-tool-result.test.ts
++++ b/packages/core/src/services/message.preserved-tool-result.test.ts
+@@ -356,14 +356,32 @@ describe("preservedSettledToolResult candidate selection", () => {
+ 		expect(picked?.userFacingText).toBe(USER_FACING);
+ 	});
+ 
+-	it("skips failed results, terminals, and results without user-facing text", () => {
++	it("picks a reportable failure userFacingText over discarding the outcome", () => {
++		const picked = preservedSettledToolResult(
++			[
++				settle("LOOKUP", {
++					success: false,
++					userFacingText: "failed op: permission denied",
++					verifiedUserFacing: true,
++				}),
++			],
++			new Set(),
++		);
++		expect(picked?.userFacingText).toBe("failed op: permission denied");
++		expect(picked?.success).toBe(false);
++	});
++
++	it("skips terminals and results without user-facing text", () => {
+ 		expect(
+ 			preservedSettledToolResult(
+ 				[
+-					settle("LOOKUP", { success: false, userFacingText: "failed op" }),
+ 					settle("REPLY", { userFacingText: "terminal reply text" }),
+ 					settle("MEMORY_CREATE", { text: "Stored memory ev-1." }),
+-					settle("MEMORY_CREATE", { userFacingText: "   " }),
++					settle("MEMORY_CREATE", {
++						success: false,
++						text: "write failed",
++						userFacingText: "   ",
++					}),
+ 				],
+ 				new Set(),
+ 			),
+diff --git a/packages/core/src/services/message.ts b/packages/core/src/services/message.ts
+index 25f9ba7cd..380333964 100644
+--- a/packages/core/src/services/message.ts
++++ b/packages/core/src/services/message.ts
+@@ -239,7 +239,9 @@ import type {
+ } from "../types/components";
+ import type { ContextEvent, ContextObject } from "../types/context-object";
+ import type { ContextDefinition, RoleGateRole } from "../types/contexts";
++import type { EffectReceipt } from "../types/effects";
+ import {
++	hasAppliedUserFacingEffectProof,
+ 	mergeEffectReceipts,
+ 	resolveAppliedUserFacingEffectReceipts,
+ 	resolveUserFacingEffectReceipts,
+@@ -1871,12 +1873,15 @@ export function subAgentCompletionRelayBody(
+ }
+ 
+ /**
+- * The most recent completed tool result whose `userFacingText` can still
+- * rescue a turn after the planner loop dies: successful, non-terminal, and not
+- * already delivered to the user through an action callback. Diagnostic
+- * `text` is never a candidate — the wire contract says it must not render as
+- * assistant prose — so a turn whose tools produced only diagnostics still
+- * falls through to the caller's failure handling.
++ * The most recent settled tool result whose `userFacingText` can still rescue
++ * a turn after the planner loop dies: non-terminal, not already delivered to
++ * the user through an action callback, and carrying reportable user-facing
++ * prose. Success is not required — a verified or otherwise composed failure
++ * `userFacingText` is still the outcome the turn produced and must not be
++ * discarded for a generic "no result" / ack line. Diagnostic `text` is never
++ * a candidate — the wire contract says it must not render as assistant prose
++ * — so a turn whose tools produced only diagnostics still falls through to
++ * the caller's failure handling.
+  */
+ export function preservedSettledToolResult(
+ 	settled: ReadonlyArray<{ name: string; result: PlannerToolResult }>,
+@@ -1884,7 +1889,7 @@ export function preservedSettledToolResult(
+ ): (PlannerToolResult & { userFacingText: string }) | undefined {
+ 	for (let index = settled.length - 1; index >= 0; index--) {
+ 		const entry = settled[index];
+-		if (entry?.result.success !== true) continue;
++		if (!entry) continue;
+ 		if (isTerminalPlannerToolName(entry.name)) continue;
+ 		const candidate = entry.result.userFacingText?.trim();
+ 		if (!candidate) continue;
+@@ -1903,6 +1908,72 @@ export function preservedSettledToolResult(
+ 	return undefined;
+ }
+ 
++/**
++ * True when a result proves an async handoff was accepted so work continues
++ * after this turn. Prefer applied/commit receipt evidence when present;
++ * otherwise require `success: true` (the minimum acceptance bar). A failed
++ * spawn that only shares an action name/flag must not license an "On it." ack.
++ */
++export function resultAcceptsAsyncHandoff(
++	result: Pick<
++		ActionResult,
++		| "success"
++		| "effectReceipts"
++		| "verifiedUserFacing"
++		| "userFacingText"
++		| "userFacingEffectReceiptIds"
++	>,
++): boolean {
++	if (hasAppliedUserFacingEffectProof(result)) {
++		return true;
++	}
++	const receipts = result.effectReceipts;
++	if (Array.isArray(receipts) && receipts.length > 0) {
++		for (const receipt of receipts) {
++			if (effectReceiptProvesHandoffAcceptance(receipt)) {
++				return true;
++			}
++		}
++		// Receipts were attached but none prove acceptance — do not fall through
++		// to a bare success flag that may lag a failed commit attempt.
++		return false;
++	}
++	return result.success === true;
++}
++
++function effectReceiptProvesHandoffAcceptance(receipt: EffectReceipt): boolean {
++	if (receipt.outcome === "applied") {
++		return (
++			typeof receipt.commit?.id === "string" &&
++			receipt.commit.id.trim().length > 0
++		);
++	}
++	// A replayed no-op re-observes an earlier committed handoff this turn.
++	return receipt.outcome === "noop" && receipt.idempotency.replayed === true;
++}
++
++/**
++ * True when at least one action result this turn both resolves to a registered
++ * `asyncHandoff` action and proves the handoff was accepted (receipt/commit
++ * evidence preferred; minimally success with no contradicting receipts).
++ */
++export function actionResultsIncludeAcceptedAsyncHandoff(
++	actions: readonly Action[] | undefined,
++	actionResults: readonly ActionResult[],
++): boolean {
++	if (!actions || actions.length === 0 || actionResults.length === 0) {
++		return false;
++	}
++	const acceptedNames: string[] = [];
++	for (const result of actionResults) {
++		if (!resultAcceptsAsyncHandoff(result)) continue;
++		const name =
++			typeof result.data?.actionName === "string" ? result.data.actionName : "";
++		if (name.length > 0) acceptedNames.push(name);
++	}
++	return candidateActionsIncludeAsyncHandoff(actions, acceptedNames);
++}
++
+ /**
+  * Ack retained when an `asyncHandoff` action carries this turn's work past the
+  * turn boundary and Stage 1 drafted no ack of its own.
+@@ -1929,18 +2000,19 @@ export const NO_REPORTABLE_TOOL_OUTCOME_MESSAGE =
+  * ran several real tool calls and delivered only `"On it."` /
+  * `"checking your week"`, with no outcome and no failure. Precedence:
+  *
+- *   1. A completed tool's own undelivered `userFacingText` — the outcome the
+- *      turn actually produced and the planner failed to relay.
++ *   1. A tool's own undelivered `userFacingText` — success or reportable
++ *      failure — the outcome the turn actually produced and the planner
++ *      failed to relay.
+  *   2. Silence, when an action already delivered visible text through its own
+  *      callback: the user has the outcome, and a trailing ack would be a
+  *      redundant, out-of-order second bubble.
+- *   3. The ack, ONLY when an action flagged `asyncHandoff` actually executed
+- *      this turn. That work continues after the turn returns, so "on it" is
+- *      the honest outcome and the real result arrives in a later message.
++ *   3. The ack, ONLY when an `asyncHandoff` action was successfully accepted
++ *      this turn (prefer receipt/commit evidence; minimally `success` with no
++ *      contradicting receipts). A failed spawn must not end on "On it."
+  *   4. Otherwise a plain statement that the work produced nothing reportable.
+  *
+  * Keyed on turn shape — did tools run, did anything reach the user, does the
+- * executed work outlive the turn — never on the wording of the drafted ack.
++ * accepted work outlive the turn — never on the wording of the drafted ack.
+  */
+ export function answerlessToolTurnReport(args: {
+ 	settledToolResults: ReadonlyArray<{
+@@ -1958,12 +2030,9 @@ export function answerlessToolTurnReport(args: {
+ 	);
+ 	if (preserved) return preserved.userFacingText;
+ 	if (args.deliveredVisibleTexts.size > 0) return "";
+-	const executedActionNames = args.actionResults
+-		.map((result) =>
+-			typeof result.data?.actionName === "string" ? result.data.actionName : "",
+-		)
+-		.filter((name) => name.length > 0);
+-	if (candidateActionsIncludeAsyncHandoff(args.actions, executedActionNames)) {
++	if (
++		actionResultsIncludeAcceptedAsyncHandoff(args.actions, args.actionResults)
++	) {
+ 		return args.stageOneAck || ASYNC_HANDOFF_ACK_MESSAGE;
+ 	}
+ 	return NO_REPORTABLE_TOOL_OUTCOME_MESSAGE;
+diff --git a/packages/core/src/types/components.ts b/packages/core/src/types/components.ts
+index 3ce6372aa..64e1bf8ab 100644
+--- a/packages/core/src/types/components.ts
++++ b/packages/core/src/types/components.ts
+@@ -486,10 +486,11 @@ export interface Action {
+ 	 *     synchronous retrieval turns deliver one reply — the answer — on
+ 	 *     every channel.
+ 	 *   - Whether a turn that ran tool work and produced no planner prose may
+-	 *     end on an ack instead of reporting an outcome. Only an executed
+-	 *     async-handoff action licenses that; a synchronous turn must report
+-	 *     the tool's result or say plainly that it produced none, because no
+-	 *     further work follows the turn.
++	 *     end on an ack instead of reporting an outcome. Only a successfully
++	 *     accepted async-handoff result licenses that (prefer receipt/commit
++	 *     evidence; minimally `success`). A failed spawn must report the
++	 *     failure (or say plainly that nothing reportable was produced),
++	 *     never a misleading progress ack.
+ 	 *
+ 	 * Promoted subactions inherit the parent's flag.
+ 	 */
+-- 
+2.43.0
+

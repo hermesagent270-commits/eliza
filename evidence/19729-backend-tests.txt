@@ -1,0 +1,236 @@
+$ node ../scripts/run-vitest.mjs run src/services/message.answerless-tool-turn.test.ts src/services/message.preserved-tool-result.test.ts src/__tests__/voice-text-delivery-parity.test.ts
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.5 [39m[90m/src/packages/core[39m
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mreports the absence of a result instead of shipping the pre-tool ack
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000091
+
+[90mstderr[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mreports the absence of a result instead of shipping the pre-tool ack
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mreports the absence of a result instead of shipping the pre-tool ack
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mreports the absence of a result instead of shipping the pre-tool ack
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mreports the absence of a result instead of shipping the pre-tool ack
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mreports the absence of a result instead of shipping the pre-tool ack
+[22m[39m Info       Documents service stopping for agent: Answerless Tool Turn
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mreports the absence of a result instead of shipping the pre-tool ack
+[22m[39m Info       [RelationshipsService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mreports the absence of a result instead of shipping the pre-tool ack
+[22m[39m Info       [FollowUpService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers an earlier tool's undelivered outcome rather than the ack
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000091
+
+[90mstderr[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers an earlier tool's undelivered outcome rather than the ack
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers an earlier tool's undelivered outcome rather than the ack
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers an earlier tool's undelivered outcome rather than the ack
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers an earlier tool's undelivered outcome rather than the ack
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers an earlier tool's undelivered outcome rather than the ack
+[22m[39m Info       Documents service stopping for agent: Answerless Tool Turn
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers an earlier tool's undelivered outcome rather than the ack
+[22m[39m Info       [RelationshipsService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers an earlier tool's undelivered outcome rather than the ack
+[22m[39m Info       [FollowUpService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mkeeps the ack when an asyncHandoff action carries the work past the turn
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000091
+
+[90mstderr[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mkeeps the ack when an asyncHandoff action carries the work past the turn
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mkeeps the ack when an asyncHandoff action carries the work past the turn
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mkeeps the ack when an asyncHandoff action carries the work past the turn
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mkeeps the ack when an asyncHandoff action carries the work past the turn
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mkeeps the ack when an asyncHandoff action carries the work past the turn
+[22m[39m Info       Documents service stopping for agent: Answerless Tool Turn
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mkeeps the ack when an asyncHandoff action carries the work past the turn
+[22m[39m Info       [RelationshipsService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mkeeps the ack when an asyncHandoff action carries the work past the turn
+[22m[39m Info       [FollowUpService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdoes not keep the ack when an asyncHandoff spawn fails to accept
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000091
+
+[90mstderr[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdoes not keep the ack when an asyncHandoff spawn fails to accept
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdoes not keep the ack when an asyncHandoff spawn fails to accept
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdoes not keep the ack when an asyncHandoff spawn fails to accept
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdoes not keep the ack when an asyncHandoff spawn fails to accept
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdoes not keep the ack when an asyncHandoff spawn fails to accept
+[22m[39m Info       Documents service stopping for agent: Answerless Tool Turn
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdoes not keep the ack when an asyncHandoff spawn fails to accept
+[22m[39m Info       [RelationshipsService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdoes not keep the ack when an asyncHandoff spawn fails to accept
+[22m[39m Info       [FollowUpService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers a failed sync tool's userFacingText instead of the ack or generic no-result line
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000091
+
+[90mstderr[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers a failed sync tool's userFacingText instead of the ack or generic no-result line
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers a failed sync tool's userFacingText instead of the ack or generic no-result line
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers a failed sync tool's userFacingText instead of the ack or generic no-result line
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers a failed sync tool's userFacingText instead of the ack or generic no-result line
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers a failed sync tool's userFacingText instead of the ack or generic no-result line
+[22m[39m Info       Documents service stopping for agent: Answerless Tool Turn
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers a failed sync tool's userFacingText instead of the ack or generic no-result line
+[22m[39m Info       [RelationshipsService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2mdelivers a failed sync tool's userFacingText instead of the ack or generic no-result line
+[22m[39m Info       [FollowUpService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2madds no trailing ack when an action already delivered the outcome
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000091
+
+[90mstderr[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2madds no trailing ack when an action already delivered the outcome
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2madds no trailing ack when an action already delivered the outcome
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2madds no trailing ack when an action already delivered the outcome
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2madds no trailing ack when an action already delivered the outcome
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2madds no trailing ack when an action already delivered the outcome
+[22m[39m Info       Documents service stopping for agent: Answerless Tool Turn
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2madds no trailing ack when an action already delivered the outcome
+[22m[39m Info       [RelationshipsService] Stopped successfully
+
+[90mstdout[2m | src/services/message.answerless-tool-turn.test.ts[2m > [22m[2manswerless tool turn[2m > [22m[2madds no trailing ack when an action already delivered the outcome
+[22m[39m Info       [FollowUpService] Stopped successfully
+
+ [32m✓[39m src/services/message.answerless-tool-turn.test.ts [2m([22m[2m6 tests[22m[2m)[22m[33m 312[2mms[22m[39m
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mdelivers the completed tool's user-facing result instead of the canned failure
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000081
+
+[90mstderr[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mdelivers the completed tool's user-facing result instead of the canned failure
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mdelivers the completed tool's user-facing result instead of the canned failure
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mdelivers the completed tool's user-facing result instead of the canned failure
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mdelivers the completed tool's user-facing result instead of the canned failure
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mdelivers the completed tool's user-facing result instead of the canned failure
+[22m[39m Info       Documents service stopping for agent: Preserved Result Integration
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mdelivers the completed tool's user-facing result instead of the canned failure
+[22m[39m Info       [RelationshipsService] Stopped successfully
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mdelivers the completed tool's user-facing result instead of the canned failure
+[22m[39m Info       [FollowUpService] Stopped successfully
+
+[90mstderr[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mkeeps the canned failure line when no tool produced user-facing text
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mkeeps the canned failure line when no tool produced user-facing text
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000081
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mkeeps the canned failure line when no tool produced user-facing text
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mkeeps the canned failure line when no tool produced user-facing text
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mkeeps the canned failure line when no tool produced user-facing text
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+[v5-runtime-failed] agentId=00000000-0000-0000-0000-000000000081 error=[cli-inference:sdk] subscription rate limit reached: session limit hit
+Error: [cli-inference:sdk] subscription rate limit reached: session limit hit
+    at /src/packages/core/src/services/message.preserved-tool-result.test.ts:36:7
+    at _runInlinedModule (/src/node_modules/.bun/vitest@4.1.5+4d2f1e7d6025d1f3/node_modules/vitest/dist/module-evaluator.js:206:117)
+    at processTicksAndRejections (native)
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mkeeps the canned failure line when no tool produced user-facing text
+[22m[39m Info       Documents service stopping for agent: Preserved Result Integration
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mkeeps the canned failure line when no tool produced user-facing text
+[22m[39m Info       [RelationshipsService] Stopped successfully
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2mplanner-loop death after a completed tool[2m > [22m[2mkeeps the canned failure line when no tool produced user-facing text
+[22m[39m Info       [FollowUpService] Stopped successfully
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2msubAgentCompletionRelayBody parsing (#18208)[2m > [22m[2ma failed relay turn delivers the completed result instead of the canned line
+[22m[39m Info       Starting Documents service for agent: 00000000-0000-0000-0000-000000000081
+
+[90mstderr[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2msubAgentCompletionRelayBody parsing (#18208)[2m > [22m[2ma failed relay turn delivers the completed result instead of the canned line
+[22m[39m Warn       [trajectory-logger] Runtime adapter does not support db.execute (likely InMemory adapter); skipping table setup
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2msubAgentCompletionRelayBody parsing (#18208)[2m > [22m[2ma failed relay turn delivers the completed result instead of the canned line
+[22m[39m Info       [RelationshipsService] Loaded 0 contacts from components
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2msubAgentCompletionRelayBody parsing (#18208)[2m > [22m[2ma failed relay turn delivers the completed result instead of the canned line
+[22m[39m Info       [RelationshipsService] Initialized successfully
+
+[90mstdout[2m | src/services/message.preserved-tool-result.test.ts[2m > [22m[2msubAgentCompletionRelayBody parsing (#18208)[2m > [22m[2ma failed relay turn delivers the completed result instead of the canned line
+[22m[39m Info       [FollowUpService] Successfully acquired RelationshipsService via service promise
+ Info       [FollowUpService] Initialized successfully
+
+ [32m✓[39m src/services/message.preserved-tool-result.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 289[2mms[22m[39m
+ [32m✓[39m src/__tests__/voice-text-delivery-parity.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 128[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m3 passed[39m[22m[90m (3)[39m
+[2m      Tests [22m [1m[32m23 passed[39m[22m[90m (23)[39m
+[2m   Start at [22m 02:22:46
+[2m   Duration [22m 8.56s[2m (transform 4.66s, setup 0ms, import 7.48s, tests 728ms, environment 1ms)[22m
+
+
+exit_code=0
