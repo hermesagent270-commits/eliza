@@ -1,0 +1,121 @@
+{
+  "summary": {
+    "total": 4,
+    "verified": 4,
+    "broken": 0,
+    "needsEyeball": 0,
+    "regressions": 0,
+    "knownRegressions": 0,
+    "newRegressions": 0
+  },
+  "entries": [
+    {
+      "slug": "builtin-browser",
+      "viewport": "mobile-portrait",
+      "path": "aesthetic-audit-output/mobile-portrait/builtin-browser.png",
+      "domVerdict": "needs-eyeball",
+      "ocrVerdict": "verified",
+      "reasons": [
+        "pixels match declared expectation"
+      ],
+      "regression": false,
+      "text": "< @ Notab © + © x\nEnter a URL Go ©\nNo browser tabs yet\nBrowser Bridge Available\nInstall Agent Browser Bridge\nOpen Browser Bridge Folder\nOpen Chrome extensions\n© Refresh Browser Bridge\n( 4 Askbiza ale)",
+      "words": 38,
+      "meanConfidence": 0.84,
+      "selectedMode": "auto",
+      "attempts": [
+        {
+          "mode": "auto",
+          "ok": true,
+          "text": "< @ Notab © + © x\nEnter a URL Go ©\nNo browser tabs yet\nBrowser Bridge Available\nInstall Agent Browser Bridge\nOpen Browser Bridge Folder\nOpen Chrome extensions\n© Refresh Browser Bridge\n( 4 Askbiza ale)",
+          "words": 38,
+          "chars": 163,
+          "meanConfidence": 0.84
+        }
+      ],
+      "pixelBlank": false,
+      "pixelBlankReasons": []
+    },
+    {
+      "slug": "builtin-browser",
+      "viewport": "mobile-landscape",
+      "path": "aesthetic-audit-output/mobile-landscape/builtin-browser.png",
+      "domVerdict": "needs-eyeball",
+      "ocrVerdict": "verified",
+      "reasons": [
+        "pixels match declared expectation"
+      ],
+      "regression": false,
+      "text": "< @ Notab © + © x Enter a URL Go @\nNo browser tabs yet\nBrowser Bridge Available\n( -_— \\\n(4 ask ak)\n\\. J",
+      "words": 27,
+      "meanConfidence": 0.71,
+      "selectedMode": "auto",
+      "attempts": [
+        {
+          "mode": "auto",
+          "ok": true,
+          "text": "< @ Notab © + © x Enter a URL Go @\nNo browser tabs yet\nBrowser Bridge Available\n( -_— \\\n(4 ask ak)\n\\. J",
+          "words": 27,
+          "chars": 77,
+          "meanConfidence": 0.71
+        }
+      ],
+      "pixelBlank": false,
+      "pixelBlankReasons": []
+    },
+    {
+      "slug": "builtin-browser",
+      "viewport": "desktop-landscape",
+      "path": "aesthetic-audit-output/desktop-landscape/builtin-browser.png",
+      "domVerdict": "good",
+      "ocrVerdict": "verified",
+      "reasons": [
+        "pixels match declared expectation"
+      ],
+      "regression": false,
+      "text": "< @ Notab © + [5] x Enter a URL Go o&\nNo browser tabs yet\nBrowser Bridge Available\nInstall Agent Browser Bridge\n> Open Browser ... Open Chrome exte.. J Refresh Browse...\n( + Askbiza apie)\n\\ 4",
+      "words": 39,
+      "meanConfidence": 0.74,
+      "selectedMode": "auto",
+      "attempts": [
+        {
+          "mode": "auto",
+          "ok": true,
+          "text": "< @ Notab © + [5] x Enter a URL Go o&\nNo browser tabs yet\nBrowser Bridge Available\nInstall Agent Browser Bridge\n> Open Browser ... Open Chrome exte.. J Refresh Browse...\n( + Askbiza apie)\n\\ 4",
+          "words": 39,
+          "chars": 153,
+          "meanConfidence": 0.74
+        }
+      ],
+      "pixelBlank": false,
+      "pixelBlankReasons": []
+    },
+    {
+      "slug": "builtin-browser",
+      "viewport": "ipad-portrait",
+      "path": "aesthetic-audit-output/ipad-portrait/builtin-browser.png",
+      "domVerdict": "good",
+      "ocrVerdict": "verified",
+      "reasons": [
+        "pixels match declared expectation"
+      ],
+      "regression": false,
+      "text": "< @ Notab © + © x Enter a URL Go @\nNo browser tabs yet\nBrowser Bridge Available\nInstall Agent Browser Bridge\n> Open Browser ... Open Chrome exte.. J Refresh Browse...\n[4 askeiza apie)\n\\ 4",
+      "words": 38,
+      "meanConfidence": 0.76,
+      "selectedMode": "auto",
+      "attempts": [
+        {
+          "mode": "auto",
+          "ok": true,
+          "text": "< @ Notab © + © x Enter a URL Go @\nNo browser tabs yet\nBrowser Bridge Available\nInstall Agent Browser Bridge\n> Open Browser ... Open Chrome exte.. J Refresh Browse...\n[4 askeiza apie)\n\\ 4",
+          "words": 38,
+          "chars": 150,
+          "meanConfidence": 0.76
+        }
+      ],
+      "pixelBlank": false,
+      "pixelBlankReasons": []
+    }
+  ]
+}
