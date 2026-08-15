@@ -3165,10 +3165,15 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 							}
 						}
 						if (!viewId || !capability) {
-							const reply =
-								"Specify view and capability, e.g. action=interact view=wallet capability=get-state, or ask for the current view after navigating.";
-							await callback?.({ text: reply });
-							return { success: false, text: reply };
+							// Planner-facing tool syntax, not a chat reply — return it to
+							// the planner without a user callback and mark it internal so
+							// core's transcript-visibility resolver can spot an evaluator
+							// echo of it.
+							return {
+								success: false,
+								text: "Specify view and capability, e.g. action=interact view=wallet capability=get-state, or ask for the current view after navigating.",
+								transcriptVisibility: "internal",
+							};
 						}
 						const resolvedView =
 							resolvedCapability?.view ?? resolveViewTarget(viewId, views);
@@ -3264,6 +3269,7 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 							return {
 								success: false,
 								text: `Cannot invoke capability "${capability}" on view "${viewId}": the view catalog does not declare that capability.`,
+								transcriptVisibility: "internal",
 							};
 						}
 						if (!resolvedCapability && standardCapability)
@@ -3278,6 +3284,7 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 								return {
 									success: false,
 									text: `Refusing destructive capability on view "${viewId}": ${correction.reason}. Please rephrase with explicit, unambiguous intent.`,
+									transcriptVisibility: "internal",
 								};
 							}
 							if (
@@ -3305,9 +3312,11 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 										viewGate,
 									);
 						if (!viewAllowed && authorizedView) {
-							const reply = `The ${authorizedView.label} view is not available to this caller.`;
-							await callback?.({ text: reply });
-							return { success: false, text: reply };
+							return {
+								success: false,
+								text: `The ${authorizedView.label} view is not available to this caller.`,
+								transcriptVisibility: "internal",
+							};
 						}
 						const paramsResolution = readCapabilityParams(
 							actionOptions,
@@ -3318,9 +3327,19 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 							return {
 								success: false,
 								text: `Cannot invoke capability "${capability}" on view "${viewId}": ${paramsResolution.error}.`,
+								transcriptVisibility: "internal",
 							};
 						}
-						const params = paramsResolution.params;
+						let params = paramsResolution.params;
+						// Destructive capabilities get the user's original words so the
+						// owning surface can fence name-translated targets (matrix F4:
+						// the planner translated "wifi credentials" into the stored
+						// title "wifi password" and delete-note removed a note the user
+						// never named). Injected only for delete-shaped capabilities so
+						// read/update param schemas stay untouched.
+						if (/^delete-/.test(normalizeCapabilityKey(capability)) && text) {
+							params = { ...params, ownerText: text };
+						}
 						const timeoutMs =
 							typeof actionOptions?.timeoutMs === "number" &&
 							actionOptions.timeoutMs > 0
