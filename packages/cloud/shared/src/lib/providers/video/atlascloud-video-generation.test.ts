@@ -6,6 +6,7 @@ import {
   firstAtlasVideoOutput,
   generateAtlasCloudVideo,
   getAtlasCloudVideoJobStatus,
+  resolveAtlasPollUrl,
 } from "./atlascloud-video-generation";
 import {
   VideoGenerationPendingError,
@@ -66,6 +67,24 @@ describe("Atlas Cloud video provider", () => {
       file_size: 1234,
       content_type: "video/webm",
     });
+  });
+
+  test("accepts only HTTPS same-origin Atlas poll links", () => {
+    const canonical = "https://atlas.test/api/v1/model/prediction/job%2F1";
+    expect(resolveAtlasPollUrl("https://atlas.test", undefined, "job/1")).toBe(canonical);
+    expect(resolveAtlasPollUrl("https://atlas.test", "/poll/job-1", "job/1")).toBe(
+      "https://atlas.test/poll/job-1",
+    );
+    expect(
+      resolveAtlasPollUrl("https://atlas.test", "https://attacker.invalid/collect", "job/1"),
+    ).toBe(canonical);
+    expect(resolveAtlasPollUrl("https://atlas.test", "http://atlas.test/poll", "job/1")).toBe(
+      canonical,
+    );
+    expect(resolveAtlasPollUrl("https://atlas.test", "https://user@atlas.test/poll", "job/1")).toBe(
+      canonical,
+    );
+    expect(resolveAtlasPollUrl("https://atlas.test", "http://[", "job/1")).toBe(canonical);
   });
 
   test("generates through the registered Atlas provider with inline output", async () => {
@@ -196,6 +215,63 @@ describe("Atlas Cloud video provider", () => {
         apiKeys: { ATLASCLOUD_API_KEY: "atlas-key" },
       }),
     ).rejects.toBeInstanceOf(VideoGenerationSubmissionUnknownError);
+  });
+
+  test("never sends the Atlas bearer credential to an off-origin poll URL", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (calls.length === 1) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              id: "atlas-prediction",
+              status: "starting",
+              urls: { get: "https://attacker.invalid/collect" },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: {
+            id: "atlas-prediction",
+            status: "completed",
+            outputs: ["https://cdn.atlas/video.mp4"],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === "function") handler();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+
+    try {
+      await expect(
+        generateAtlasCloudVideo({
+          model: "vidu/q3-turbo/text-to-video",
+          prompt: "a lighthouse",
+          apiKeys: {
+            ATLASCLOUD_API_KEY: "atlas-key",
+            ATLASCLOUD_BASE_URL: "https://atlas.test",
+          },
+        }),
+      ).resolves.toMatchObject({ requestId: "atlas-prediction" });
+      expect(calls.map((call) => call.url)).toEqual([
+        "https://atlas.test/api/v1/model/generateVideo",
+        "https://atlas.test/api/v1/model/prediction/atlas-prediction",
+      ]);
+      expect(calls[1]?.init).toEqual({
+        headers: { authorization: "Bearer atlas-key" },
+        redirect: "error",
+      });
+      expect(calls.some((call) => call.url.includes("attacker.invalid"))).toBe(false);
+    } finally {
+      timer.mockRestore();
+    }
   });
 
   test("retains the Atlas prediction id when polling is unreachable", async () => {

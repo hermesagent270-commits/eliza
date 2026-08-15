@@ -21,6 +21,38 @@ function atlasBaseUrl(request: VideoGenerationRequest): string {
   return (request.apiKeys.ATLASCLOUD_BASE_URL || "https://api.atlascloud.ai").replace(/\/+$/, "");
 }
 
+/**
+ * Resolve an upstream-provided poll link without allowing Atlas credentials to
+ * cross an origin boundary. Invalid, insecure, credential-bearing, or
+ * off-origin links fall back to the canonical same-provider endpoint.
+ */
+export function resolveAtlasPollUrl(
+  baseUrl: string,
+  candidate: string | undefined,
+  predictionId: string,
+): string {
+  const canonical = `${baseUrl}/api/v1/model/prediction/${encodeURIComponent(predictionId)}`;
+  if (!candidate) return canonical;
+
+  try {
+    const base = new URL(`${baseUrl}/`);
+    const resolved = new URL(candidate, base);
+    if (
+      resolved.protocol !== "https:" ||
+      resolved.origin !== base.origin ||
+      resolved.username ||
+      resolved.password
+    ) {
+      return canonical;
+    }
+    return resolved.toString();
+  } catch {
+    // error-policy:J3 upstream URLs are untrusted input; canonical fallback is
+    // deterministic and keeps the bearer credential on the configured origin.
+    return canonical;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -187,7 +219,7 @@ export async function generateAtlasCloudVideo(
       "Atlas video provider returned no prediction id",
     );
   }
-  const pollUrl = submitted.urls?.get ?? `${baseUrl}/api/v1/model/prediction/${predictionId}`;
+  const pollUrl = resolveAtlasPollUrl(baseUrl, submitted.urls?.get, predictionId);
   const deadline = Date.now() + ATLAS_POLL_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
@@ -195,7 +227,10 @@ export async function generateAtlasCloudVideo(
 
     let pollResponse: Response;
     try {
-      pollResponse = await fetch(pollUrl, { headers: authHeader });
+      pollResponse = await fetch(pollUrl, {
+        headers: authHeader,
+        redirect: "error",
+      });
     } catch (error) {
       // error-policy:J1 a known prediction id makes poll transport failure a
       // pending provider state that the durable reconciliation path can query.
