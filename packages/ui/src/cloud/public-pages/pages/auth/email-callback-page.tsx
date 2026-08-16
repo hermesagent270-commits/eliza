@@ -288,21 +288,26 @@ function EmailCallbackContent() {
                   })}
           </Button>
         ) : (
-          <Button asChild className="hosted-signin-focus-emphasis mt-2">
+          <Button
+            asChild
+            className="hosted-signin-focus-emphasis mt-2 border border-transparent"
+          >
             <a href="/login">
-              {t("cloud.emailCallback.resend", {
-                defaultValue: "Resend sign-in email",
+              {t("cloud.emailCallback.signInAgain", {
+                defaultValue: "Sign In Again",
               })}
             </a>
           </Button>
         )}
-        <Button asChild variant="ghost">
-          <a href="/login">
-            {t("cloud.login.backToLogin", {
-              defaultValue: "Back to login",
-            })}
-          </a>
-        </Button>
+        {email ? (
+          <Button asChild variant="ghost">
+            <a href="/login">
+              {t("cloud.login.backToLogin", {
+                defaultValue: "Back to login",
+              })}
+            </a>
+          </Button>
+        ) : null}
       </Frame>
     );
   }

@@ -401,14 +401,13 @@ describe("EmailCallbackPage", () => {
     expect(
       screen.getByRole("heading", { level: 1, name: "Sign-in failed" }),
     ).toBeTruthy();
-    const resend = screen.getByRole("link", {
-      name: "Resend sign-in email",
-    });
-    const recovery = screen.getByRole("link", { name: "Back to login" });
-    expect(resend.getAttribute("href")).toBe("/login");
+    const recovery = screen.getByRole("link", { name: "Sign In Again" });
     expect(recovery.getAttribute("href")).toBe("/login");
-    await user.tab();
-    expect(document.activeElement).toBe(resend);
+    expect(recovery.className).toMatch(/hosted-signin-focus-emphasis/);
+    expect(
+      screen.queryByRole("link", { name: "Resend sign-in email" }),
+    ).toBeNull();
+    expect(screen.queryByRole("link", { name: "Back to login" })).toBeNull();
     await user.tab();
     expect(document.activeElement).toBe(recovery);
     expect(callbackState.verifyEmailCallback).not.toHaveBeenCalled();
