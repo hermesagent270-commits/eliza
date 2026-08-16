@@ -1,4 +1,8 @@
-/** Exercises Atlas Cloud video submission and reconciliation with deterministic fetch fixtures. */
+/**
+ * Exercises Atlas Cloud video submission and reconciliation with deterministic
+ * fetch fixtures, plus real loopback HTTP servers for the redirect-containment
+ * tests so the true fetch redirect behavior is under test rather than a mock.
+ */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   atlasCloudVideoProvider,
@@ -287,6 +291,117 @@ describe("Atlas Cloud video provider", () => {
       expect(calls.some((call) => call.url.includes("attacker.invalid"))).toBe(false);
     } finally {
       timer.mockRestore();
+    }
+  });
+
+  test("refuses to follow a poll redirect that would re-send the bearer credential", async () => {
+    const attackerRequests: Array<{ url: string; authorization: string | null }> = [];
+    const attacker = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        attackerRequests.push({
+          url: request.url,
+          authorization: request.headers.get("authorization"),
+        });
+        return Response.json({
+          data: {
+            id: "atlas-prediction",
+            status: "completed",
+            outputs: ["https://cdn.atlas/video.mp4"],
+          },
+        });
+      },
+    });
+    let pollRequests = 0;
+    const origin = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/api/v1/model/generateVideo") {
+          return Response.json({ data: { id: "atlas-prediction", status: "starting" } });
+        }
+        pollRequests++;
+        return new Response(null, {
+          status: 302,
+          headers: { location: `http://127.0.0.1:${attacker.port}${url.pathname}` },
+        });
+      },
+    });
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === "function") handler();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+
+    try {
+      const error = await generateAtlasCloudVideo({
+        model: "vidu/q3-turbo/text-to-video",
+        prompt: "a lighthouse",
+        apiKeys: {
+          ATLASCLOUD_API_KEY: "atlas-key",
+          ATLASCLOUD_BASE_URL: `http://127.0.0.1:${origin.port}`,
+        },
+      }).catch((caught) => caught);
+      expect(error).toBeInstanceOf(VideoGenerationPendingError);
+      expect((error as InstanceType<typeof VideoGenerationPendingError>).requestId).toBe(
+        "atlas-prediction",
+      );
+      expect(pollRequests).toBe(1);
+      expect(attackerRequests).toEqual([]);
+    } finally {
+      timer.mockRestore();
+      origin.stop(true);
+      attacker.stop(true);
+    }
+  });
+
+  test("keeps the status-probe credential on the configured origin when redirected", async () => {
+    const attackerRequests: Array<{ url: string; authorization: string | null }> = [];
+    const attacker = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        attackerRequests.push({
+          url: request.url,
+          authorization: request.headers.get("authorization"),
+        });
+        return Response.json({
+          data: {
+            id: "atlas-prediction",
+            status: "succeeded",
+            outputs: ["https://cdn.atlas/video.mp4"],
+          },
+        });
+      },
+    });
+    const origin = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        return new Response(null, {
+          status: 302,
+          headers: { location: `http://127.0.0.1:${attacker.port}${url.pathname}` },
+        });
+      },
+    });
+
+    try {
+      await expect(
+        getAtlasCloudVideoJobStatus({
+          model: "vidu/q3-turbo/text-to-video",
+          requestId: "atlas-prediction",
+          apiKeys: {
+            ATLASCLOUD_API_KEY: "atlas-key",
+            ATLASCLOUD_BASE_URL: `http://127.0.0.1:${origin.port}`,
+          },
+        }),
+      ).rejects.toThrow("Atlas prediction status failed: 302");
+      expect(attackerRequests).toEqual([]);
+    } finally {
+      origin.stop(true);
+      attacker.stop(true);
     }
   });
 

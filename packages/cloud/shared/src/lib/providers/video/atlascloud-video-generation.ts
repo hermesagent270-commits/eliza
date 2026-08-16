@@ -211,7 +211,10 @@ export async function generateAtlasCloudVideo(
 
     let pollResponse: Response;
     try {
-      pollResponse = await fetch(pollUrl, { headers: authHeader });
+      // Following a redirect would re-send the bearer credential wherever the
+      // provider response points, so a 3xx is returned as-is and settles as a
+      // pending provider state through the non-ok branch below.
+      pollResponse = await fetch(pollUrl, { headers: authHeader, redirect: "manual" });
     } catch (error) {
       // error-policy:J1 a known prediction id makes poll transport failure a
       // pending provider state that the durable reconciliation path can query.
@@ -267,8 +270,12 @@ export async function getAtlasCloudVideoJobStatus(
     /\/+$/,
     "",
   );
+  // Same credential-containment rule as the generation poll: never follow a
+  // redirect with the bearer header; a 3xx throws below and the reconcile
+  // boundary retries the probe on its next tick.
   const response = await fetch(`${baseUrl}/api/v1/model/prediction/${req.requestId}`, {
     headers: { authorization: `Bearer ${apiKey}` },
+    redirect: "manual",
   });
   if (response.status === 404) {
     return {
