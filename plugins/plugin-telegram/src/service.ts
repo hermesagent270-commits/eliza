@@ -1724,6 +1724,35 @@ export class TelegramService extends Service {
     // have no inbound admission surface here. The authority bootstraps the
     // principal entity itself (reconcile path), so a denied sender mutates
     // no participant state; on admission the normal sync path runs.
+    const isMembershipTransition =
+      ctx.message &&
+      ("new_chat_members" in ctx.message || "left_chat_member" in ctx.message);
+
+    // Telegram service messages are provider-authenticated membership facts,
+    // not sender-authored chat content. For an already-known scope, apply the
+    // transition before admission: after a bot re-add, fresh membership
+    // evidence is what restores the persisted scope from unavailable. The
+    // sender is still gated below before ordinary participant/message work.
+    const membershipTransitionPreprocessed =
+      Boolean(isMembershipTransition) &&
+      this.knownChats.has(this.scopedTelegramKey(chatId, accountId));
+    if (membershipTransitionPreprocessed) {
+      const worldId = createUniqueUuid(
+        this.runtime,
+        this.scopedTelegramKey(chatId, accountId),
+      ) as UUID;
+      const roomId = createUniqueUuid(
+        this.runtime,
+        this.scopedTelegramKey(
+          ctx.message?.message_thread_id
+            ? `${chatId}-${ctx.message.message_thread_id}`
+            : chatId,
+          accountId,
+        ),
+      ) as UUID;
+      await this.syncNewChatMember(ctx, worldId, roomId, chatId, accountId);
+      await this.syncLeftChatMember(ctx, worldId, roomId, accountId);
+    }
     if (
       ctx.message &&
       (ctx.chat.type === "group" || ctx.chat.type === "supergroup")
@@ -1802,7 +1831,11 @@ export class TelegramService extends Service {
     }
 
     // For existing chats, determine the required operations based on chat type
-    await this.processExistingChat(ctx, accountId);
+    await this.processExistingChat(
+      ctx,
+      accountId,
+      membershipTransitionPreprocessed,
+    );
 
     await next();
   }
@@ -1818,6 +1851,7 @@ export class TelegramService extends Service {
   private async processExistingChat(
     ctx: Context,
     accountId = this.defaultAccountId,
+    membershipTransitionPreprocessed = false,
   ): Promise<void> {
     if (!ctx.chat) {
       return;
@@ -1849,7 +1883,7 @@ export class TelegramService extends Service {
 
     // For non-private chats, synchronize entity information
     if (ctx.from && ctx.chat.type !== "private") {
-      await this.syncEntity(ctx, accountId);
+      await this.syncEntity(ctx, accountId, membershipTransitionPreprocessed);
     }
   }
 
@@ -2071,6 +2105,7 @@ export class TelegramService extends Service {
   private async syncEntity(
     ctx: Context,
     accountId = this.defaultAccountId,
+    membershipTransitionPreprocessed = false,
   ): Promise<void> {
     if (!ctx.chat) {
       return;
@@ -2094,8 +2129,10 @@ export class TelegramService extends Service {
 
     // Handle all three entity sync cases separately for clarity
     await this.syncMessageSender(ctx, worldId, roomId, chatId, accountId);
-    await this.syncNewChatMember(ctx, worldId, roomId, chatId, accountId);
-    await this.syncLeftChatMember(ctx, worldId, roomId, accountId);
+    if (!membershipTransitionPreprocessed) {
+      await this.syncNewChatMember(ctx, worldId, roomId, chatId, accountId);
+      await this.syncLeftChatMember(ctx, worldId, roomId, accountId);
+    }
   }
 
   /**

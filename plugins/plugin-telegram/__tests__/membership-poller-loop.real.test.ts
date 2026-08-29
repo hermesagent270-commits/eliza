@@ -10,11 +10,9 @@
  * (per-room memory writes, deterministic-provider model invocations, and the
  * authority's own `authorize` decision), not on a single aggregate count.
  *
- * The `it.fails` tripwire at the bottom pins the KNOWN connector-path
- * recovery deadlock; the first (green) test doubles as its companion proof
- * that the shared harness itself admits messages, so a red tripwire is
- * attributable to the deadlock rather than a broken boot. Deterministic;
- * runs entirely on 127.0.0.1.
+ * The bot re-add case proves that fresh provider membership evidence can
+ * restore a previously unavailable scope without allowing ordinary messages
+ * through the fail-closed gate. Deterministic; runs entirely on 127.0.0.1.
  */
 import type { UUID } from "@elizaos/core";
 import { createUniqueUuid, ModelType } from "@elizaos/core";
@@ -42,8 +40,8 @@ const CHAT_ID = -480_15;
  * resolution; EQUAL is not newer) can never silently skip an event for
  * landing in the same wall-clock second as its predecessor.
  */
-const BASE_DATE = Math.floor(Date.now() / 1000) - 10_000;
-const dateFor = (updateId: number): number => BASE_DATE + updateId;
+const BASE_DATE = Math.floor(Date.now() / 1000);
+const dateFor = (updateId: number): number => BASE_DATE + (updateId % 1_000);
 /** Membership chat-room key for the default account (`membershipChatRoomKey`). */
 const CHAT_KEY = String(CHAT_ID);
 const MEMBER_TG_ID = 480_151;
@@ -1069,24 +1067,7 @@ describe("telegram membership lifecycle over the real long-poll connector (keyle
     expect(wire.unsupportedCalls).toEqual([]);
   }, 240_000);
 
-  it.fails("bot re-add + fresh join evidence restores admission for a still-valid member (KNOWN deadlock at the PR head)", async () => {
-    // KNOWN connector-path recovery deadlock, pinned so a fix flips this
-    // tripwire green: after a bot kick, `my_chat_member` revoked→present
-    // clears the IN-MEMORY tombstone, but the PERSISTED scope health stays
-    // `unavailable`. The middleware admission gate denies every group
-    // update while scope health is degraded — including the join updates
-    // that carry the fresh evidence which would advance the scope back to
-    // `current` — and `authority_unavailable` is not in the gate's
-    // reconcile-miss set (RECONCILE_MISS_REASONS). The scope can therefore
-    // never recover through the connector until something external resets
-    // it. Member-level revocation recovery (no bot kick) DOES work; see
-    // the lifecycle test above.
-    //
-    // Companion-test discipline: this file's first (green) test uses the
-    // SAME harness (same boot, same fixtures, same wire server) and
-    // proves it admits messages, so the throw below is attributable to
-    // the deadlock rather than a broken boot; if the harness breaks, the
-    // companion fails normally while this tripwire stays red.
+  it("bot re-add + fresh join evidence restores admission for a still-valid member", async () => {
     const { mkdtemp } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const path = await import("node:path");
