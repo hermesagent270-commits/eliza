@@ -128,6 +128,15 @@ function parseBodyText(
   return text;
 }
 
+/** Normalize the exported split title/body DTO into v2's body remainder. */
+function parseSplitBody(value: unknown, field: string): string {
+  const body = parseBodyText(value, field);
+  if (body.length === 0 || body.startsWith("\n") || body.startsWith("\r\n")) {
+    return body;
+  }
+  return `\n${body}`;
+}
+
 /**
  * Split the one user-authored note field into the storage schema's stable list
  * label and verbatim remainder. `title` is the first line bounded to
@@ -248,10 +257,28 @@ function parseRevision(value: unknown): number {
 
 export function parseCreateNoteInput(value: unknown): CreateNoteInput {
   const record = requireRecord(value, "note");
-  assertOnlyKeys(record, ["title", "body", "color"], "note");
+  assertOnlyKeys(record, ["content", "title", "body", "color"], "note");
+  const hasContent = hasOwn(record, "content");
+  if (hasContent && (hasOwn(record, "title") || hasOwn(record, "body"))) {
+    throw validationError(
+      "note must provide content or title/body, not both.",
+      "note",
+    );
+  }
+  const parsedContent = hasContent
+    ? parseNoteContent(record.content, "note.content")
+    : {
+        title: parseRequiredTitle(record.title, "note.title"),
+        // The exported service historically accepted title/body as separate
+        // fields and the view inserted their separator. Normalize that legacy
+        // public DTO into v2's verbatim-remainder representation so callers do
+        // not silently render `Titlebody` after the schema migration.
+        body: hasOwn(record, "body")
+          ? parseSplitBody(record.body, "note.body")
+          : "",
+      };
   return {
-    title: parseRequiredTitle(record.title, "note.title"),
-    body: hasOwn(record, "body") ? parseBodyText(record.body, "note.body") : "",
+    ...parsedContent,
     color: hasOwn(record, "color")
       ? parseStickyColor(record.color, "note.color")
       : "yellow",
@@ -260,13 +287,22 @@ export function parseCreateNoteInput(value: unknown): CreateNoteInput {
 
 export function parseUpdateNoteInput(value: unknown): UpdateNoteInput {
   const record = requireRecord(value, "note patch");
-  assertOnlyKeys(record, ["title", "body", "color"], "note patch");
+  assertOnlyKeys(record, ["content", "title", "body", "color"], "note patch");
+  const hasContent = hasOwn(record, "content");
+  if (hasContent && (hasOwn(record, "title") || hasOwn(record, "body"))) {
+    throw validationError(
+      "note patch must provide content or title/body, not both.",
+      "note patch",
+    );
+  }
   const patch: UpdateNoteInput = {};
-  if (hasOwn(record, "title")) {
+  if (hasContent) {
+    Object.assign(patch, parseNoteContent(record.content, "note.content"));
+  } else if (hasOwn(record, "title")) {
     patch.title = parseRequiredTitle(record.title, "note.title");
   }
-  if (hasOwn(record, "body")) {
-    patch.body = parseBodyText(record.body, "note.body");
+  if (!hasContent && hasOwn(record, "body")) {
+    patch.body = parseSplitBody(record.body, "note.body");
   }
   if (hasOwn(record, "color")) {
     patch.color = parseStickyColor(record.color, "note.color");

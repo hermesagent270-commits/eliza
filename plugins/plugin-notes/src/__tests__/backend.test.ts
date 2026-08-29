@@ -27,7 +27,6 @@ import { notesRoutes } from "../routes.js";
 import { NOTES_SERVICE_TYPE, NotesService } from "../service.js";
 import { NotesStore, notesStateFilePath } from "../store.js";
 import { reconstructNoteContent, type StickyNote } from "../types.js";
-import { parseNoteContent } from "../validation.js";
 
 const temporaryDirectories: string[] = [];
 const testRuntimes: AgentRuntime[] = [];
@@ -429,7 +428,7 @@ describe("NotesStore", () => {
     const reloadedNew = reloaded.getNote(added.id);
     expect(reloadedNew).toMatchObject({
       title: "New note",
-      body: "After upgrade",
+      body: "\nAfter upgrade",
     });
     await reloaded.stop();
   });
@@ -458,7 +457,7 @@ describe("Notes content round-trip (#29003)", () => {
     it(`commits ${name} without corruption and reloads it intact`, async () => {
       const filePath = await temporaryStateFile();
       const service = await serviceFor(filePath);
-      const created = await service.createNote(parseNoteContent(original));
+      const created = await service.createNote({ content: original });
       // The committed record reconstructs to the exact user input.
       expect(reconstructNoteContent(created)).toBe(original);
       // The bounded label never exceeds the schema's list-label ceiling.
@@ -477,6 +476,32 @@ describe("Notes content round-trip (#29003)", () => {
       await restarted.stop();
     });
   }
+
+  it("keeps the exported split title/body service DTO coherent across restart", async () => {
+    const filePath = await temporaryStateFile();
+    const service = await serviceFor(filePath);
+    const created = await service.createNote({
+      title: "Release plan",
+      body: "Verify the signed build",
+    });
+    expect(reconstructNoteContent(created)).toBe(
+      "Release plan\nVerify the signed build",
+    );
+
+    const updated = await service.updateNote(created.id, {
+      body: "Publish after verification",
+    });
+    expect(reconstructNoteContent(updated)).toBe(
+      "Release plan\nPublish after verification",
+    );
+    await service.stop();
+
+    const restarted = await serviceFor(filePath);
+    expect(reconstructNoteContent(restarted.getNote(created.id))).toBe(
+      "Release plan\nPublish after verification",
+    );
+    await restarted.stop();
+  });
 
   it("upgrades a v1 durable document to the v2 body layout on load", async () => {
     const filePath = await temporaryStateFile();
@@ -512,7 +537,7 @@ describe("Notes content round-trip (#29003)", () => {
       "Header Line\nFirst paragraph\nSecond paragraph",
     );
     // A subsequent write persists the upgraded v2 schema version.
-    await service.createNote(parseNoteContent("Fresh note"));
+    await service.createNote({ content: "Fresh note" });
     await service.stop();
     const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
     expect(persisted.schemaVersion).toBe(2);
@@ -909,7 +934,7 @@ describe("Notes capabilities", () => {
     expect(remaining).toHaveLength(1);
     expect(remaining[0]).toMatchObject({
       title: "Keep",
-      body: "edited in the race window",
+      body: "\nedited in the race window",
     });
   });
 

@@ -26,7 +26,6 @@ import {
 
 import { getNotesService } from "./service.js";
 import type { StickyNote } from "./types.js";
-import { parseNoteContent } from "./validation.js";
 
 const NOTES_OPS = ["create", "list", "update", "delete"] as const;
 type NotesOp = (typeof NOTES_OPS)[number];
@@ -224,9 +223,7 @@ export const notesAction: Action = {
     }
 
     if (op === "create") {
-      const created = await service.createNoteWithCommit(
-        parseNoteContent(content),
-      );
+      const created = await service.createNoteWithCommit({ content });
       const note = created.value;
       const text = created.replayed
         ? `that note was already saved: ${describe(note)}`
@@ -264,7 +261,7 @@ export const notesAction: Action = {
     const updated = await service.updateNoteByLookupWithCommit(
       "query",
       content,
-      parseNoteContent(replacement),
+      { content: replacement },
     );
     const text =
       updated.consolidatedCount > 0

@@ -23,7 +23,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { notesAction } from "./action.js";
 import { NOTES_SERVICE_TYPE, NotesService } from "./service.js";
 import { NotesStore } from "./store.js";
-import { parseNoteContent } from "./validation.js";
 
 const tmpDirs: string[] = [];
 
@@ -277,7 +276,7 @@ describe("identical-duplicate notes", () => {
   ): Promise<NotesService> {
     const service = runtime.getService<NotesService>(NOTES_SERVICE_TYPE);
     if (!service) throw new Error("NotesService missing from harness");
-    const original = await service.createNote(parseNoteContent(content));
+    const original = await service.createNote({ content });
     await service.store.transact((draft) => {
       for (let index = 1; index < copies; index += 1) {
         draft.notes.push({ ...original, id: `legacy-copy-${index}` });

@@ -29,7 +29,6 @@ import { notesProvider, renderSavedNotesText } from "./provider.js";
 import { NOTES_SERVICE_TYPE, NotesService } from "./service.js";
 import { NotesStore } from "./store.js";
 import type { StickyNote } from "./types.js";
-import { parseNoteContent } from "./validation.js";
 
 /**
  * `String.prototype.isWellFormed` is ES2024 and the workspace compiles against
@@ -77,7 +76,7 @@ async function serviceWithNotes(contents: string[]): Promise<NotesService> {
   });
   await service.initialize();
   for (const content of contents) {
-    await service.createNote(parseNoteContent(content));
+    await service.createNote({ content });
   }
   return service;
 }

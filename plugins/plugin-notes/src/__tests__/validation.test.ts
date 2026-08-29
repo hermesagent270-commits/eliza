@@ -206,7 +206,7 @@ describe("Notes boundary validation", () => {
       });
       expect(note).toEqual({
         title: "Task Note",
-        body: "Details here",
+        body: "\nDetails here",
         color: "rose",
       });
     });
