@@ -132,6 +132,21 @@ describe("POST /api/v1/user/wallets/rpc JSON body", () => {
     expect(executeServerWalletRpc).not.toHaveBeenCalled();
   });
 
+  test("reports replay-cache outages as service unavailable", async () => {
+    verifyWalletSignature.mockRejectedValue(
+      new Error("Service temporarily unavailable"),
+    );
+
+    const res = await post(canonical);
+
+    expect(res.status).toBe(503);
+    expect((await res.json()) as unknown).toEqual({
+      success: false,
+      error: "Service temporarily unavailable",
+    });
+    expect(executeServerWalletRpc).not.toHaveBeenCalled();
+  });
+
   test("still executes a canonical signed object body", async () => {
     verifyWalletSignature.mockResolvedValue({
       wallet_address: WALLET,

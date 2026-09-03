@@ -498,7 +498,7 @@ describeE2E("POST /api/v1/user/wallets/rpc", () => {
     expect(body.success).toBe(false);
   });
 
-  test("signed wallet auth rejects a mismatched clientAddress as forbidden", async () => {
+  test("signed wallet auth fails closed when its replay cache is unavailable", async () => {
     const rpcBody = {
       clientAddress: "0x0000000000000000000000000000000000000000",
       payload: { method: "personal_sign", params: ["hello"] },
@@ -510,18 +510,18 @@ describeE2E("POST /api/v1/user/wallets/rpc", () => {
       // The signed payload hash must commit to the exact bytes sent.
       headers: await signedWalletHeaders("/api/v1/user/wallets/rpc", rpcBody),
     });
-    // The signature verifies, then the route rejects the body address because
-    // it does not match the authenticated signing wallet. This is an
-    // authenticated authorization failure, not a missing-authentication 401.
-    expect(res.status).toBe(403);
+    // The keyless integration Worker has no Redis replay cache. Wallet-header
+    // authentication must fail closed before either trusting the signed
+    // identity or checking body ownership, and the route must identify that
+    // dependency outage as service-unavailable rather than bad credentials.
+    expect(res.status).toBe(503);
     const body = (await res.json()) as {
       success?: boolean;
       error?: string;
     };
     expect(body).toEqual({
       success: false,
-      error:
-        "Unauthorized: clientAddress does not belong to the authenticated wallet",
+      error: "Service temporarily unavailable",
     });
   });
 });

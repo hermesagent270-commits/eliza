@@ -114,10 +114,16 @@ app.post("/", async (c) => {
       (error.message.includes("Invalid wallet signature") ||
         error.message.includes("Wallet authentication failed") ||
         error.message.includes("Signature has already been used") ||
-        error.message.includes("Signature timestamp expired") ||
-        error.message.includes("Service temporarily unavailable"))
+        error.message.includes("Signature timestamp expired"))
     ) {
       return c.json({ success: false, error: error.message }, 401);
+    }
+
+    if (
+      error instanceof Error &&
+      error.message.includes("Service temporarily unavailable")
+    ) {
+      return c.json({ success: false, error: error.message }, 503);
     }
 
     if (error instanceof Error && error.name === "RpcRequestExpiredError") {
