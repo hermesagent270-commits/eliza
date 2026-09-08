@@ -7,11 +7,39 @@
  * users before any provider or billing work.
  */
 
-import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from "bun:test";
 
 const aiActual = require("ai") as Record<string, unknown>;
 const aiBillingActual = { ...(await import("@/lib/services/ai-billing")) };
 const creditsActual = { ...(await import("@/lib/services/credits")) };
+
+process.env.DATABASE_URL = "pglite://memory";
+process.env.TEST_DATABASE_URL = "pglite://memory";
+let policyDatabase: typeof import("@/db/client");
+beforeAll(async () => {
+  policyDatabase = await import("@/db/client");
+  const pg = policyDatabase.getPgliteClientForTests();
+  await pg.exec("CREATE TABLE organizations(id uuid PRIMARY KEY)");
+  const { installOrganizationPolicyTestSchema } = await import(
+    "@/db/repositories/organization-policy-test-fixture"
+  );
+  await installOrganizationPolicyTestSchema((query) => pg.exec(query));
+  await pg.query(
+    "INSERT INTO organizations(id,credit_balance) VALUES($1,100)",
+    [ORG],
+  );
+});
+afterAll(async () => {
+  await policyDatabase.closeDatabaseConnectionsForTests();
+});
 
 const ORG = "00000000-0000-4000-8000-0000000000aa";
 const USER = "00000000-0000-4000-8000-0000000000bb";
@@ -175,6 +203,8 @@ mock.module("@/lib/services/apps", () => ({
 }));
 
 const admitAppInferenceCacheOnly = mock();
+const settleAppAdmission = mock(async () => null);
+const markAppProviderDispatched = mock(async () => undefined);
 class TestInferenceAppAffiliateUnsupportedError extends Error {}
 const assertInferenceAppAffiliateSupported = mock(
   (_appId: string, affiliateCode: string | null | undefined) => {
@@ -239,6 +269,10 @@ beforeEach(() => {
   getAuthorizedMonetizedAppForUser.mockReset();
   getAuthorizedMonetizedAppForUserCacheOnly.mockReset();
   admitAppInferenceCacheOnly.mockReset();
+  settleAppAdmission.mockReset();
+  settleAppAdmission.mockResolvedValue(null);
+  markAppProviderDispatched.mockReset();
+  markAppProviderDispatched.mockResolvedValue(undefined);
   assertInferenceAppAffiliateSupported.mockClear();
   createCreditReservationSettler.mockReset();
   generateText.mockReset();
@@ -268,8 +302,9 @@ beforeEach(() => {
   admitAppInferenceCacheOnly.mockResolvedValue({
     mode: "deferred_app_reservation",
     estimatedTotalCostUsd: 0.002,
-    settle: async () => null,
-    settleUnknown: async () => null,
+    settle: settleAppAdmission,
+    settleUnknown: settleAppAdmission,
+    markProviderDispatched: markAppProviderDispatched,
   });
   reserveCredits.mockResolvedValue({
     reservedAmount: 0.01,
@@ -393,6 +428,33 @@ describe("/v1/messages IAC fast path", () => {
       { subscriptionFunded: false },
     );
     expect(generateText).toHaveBeenCalledTimes(1);
+  });
+
+  test("late app dispatch admission denial returns Anthropic 402 before the model call", async () => {
+    const app = {
+      id: "00000000-0000-4000-8000-0000000000dd",
+      organization_id: ORG,
+      created_by_user_id: USER,
+      monetization_enabled: true,
+      inference_markup_percentage: "100",
+    };
+    getAuthorizedMonetizedAppForUserCacheOnly.mockResolvedValueOnce({
+      kind: "ready",
+      app,
+    });
+    markAppProviderDispatched.mockRejectedValueOnce(
+      new TestInsufficientCreditsError(0.002),
+    );
+
+    const response = await postMessagesInWorker({ "X-App-Id": app.id });
+
+    expect(response.status).toBe(402);
+    await expect(response.json()).resolves.toMatchObject({
+      type: "error",
+      error: { type: "billing_error" },
+    });
+    expect(settleAppAdmission).toHaveBeenCalledWith(0);
+    expect(generateText).not.toHaveBeenCalled();
   });
 
   test("Worker requests fail closed while the API-key cache warms", async () => {
@@ -698,6 +760,7 @@ describe("/v1/messages IAC fast path", () => {
         appId: app.id,
         organizationId: ORG,
         userId: USER,
+        atomicProviderBoundary: true,
       }),
     );
     expect(reserveInferenceCredits).not.toHaveBeenCalled();

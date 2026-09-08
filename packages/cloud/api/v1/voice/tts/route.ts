@@ -289,7 +289,17 @@ async function __hono_POST(c: AppContext) {
     settlementUserId = user.id;
     timings.authMs = Date.now() - requestStart;
     const admissionStart = Date.now();
-    if (pendingResponse) return pendingResponse;
+    if (pendingResponse) {
+      timings.admissionMs = Date.now() - admissionStart;
+      if (providerSelection && !providerSelection.ok) {
+        for (const [name, value] of Object.entries(
+          buildTtsObservabilityHeaders(providerSelection.provider, timings),
+        )) {
+          pendingResponse.headers.set(name, value);
+        }
+      }
+      return pendingResponse;
+    }
     if (providerSelection && !providerSelection.ok) {
       logger.warn?.("[Voice TTS API] TTS provider selection failed", {
         provider: providerSelection.provider,
@@ -668,6 +678,7 @@ async function __hono_POST(c: AppContext) {
         admissionSnapshot,
         credential: credentialGuard.credentialForAdmission(),
         idempotencyKey: ttsIdempotencyKey ?? undefined,
+        atomicProviderBoundary: true,
       });
       reservation = admission.reservation;
       settleUnknown = admission.settleUnknown;

@@ -157,10 +157,6 @@
       "cache": false,
       "outputs": []
     },
-    "@elizaos/plugin-cli#build": {
-      "dependsOn": ["@elizaos/core#build", "^build"],
-      "outputs": ["dist/**"]
-    },
     "@elizaos/plugin-app-control#build": {
       "dependsOn": ["@elizaos/core#build", "^build"],
       "outputs": ["dist/**"]
@@ -197,6 +193,14 @@
       "outputs": ["dist/**"]
     },
     "lint": {
+      "outputs": []
+    },
+    "@elizaos/capacitor-gateway#lint": {
+      "env": ["DEVELOPER_DIR"],
+      "outputs": []
+    },
+    "@elizaos/capacitor-gateway#lint:check": {
+      "env": ["DEVELOPER_DIR"],
       "outputs": []
     },
     "@elizaos/ui#lint:check": {
@@ -267,6 +271,7 @@
     },
     "@elizaos/cloud-shared#typecheck": {
       "dependsOn": [
+        "@elizaos/login#build",
         "@elizaos/plugin-cloud-apps#build",
         "@elizaos/plugin-doordash#build",
         "@elizaos/plugin-scheduling#build",
@@ -280,10 +285,7 @@
       "outputs": []
     },
     "@elizaos/plugin-calendar#typecheck": {
-      "dependsOn": [
-        "@elizaos/ui#build",
-        "@elizaos/plugin-scheduling#build"
-      ],
+      "dependsOn": ["@elizaos/ui#build", "@elizaos/plugin-scheduling#build"],
       "outputs": []
     },
     "@elizaos/plugin-personal-assistant#typecheck": {
