@@ -7,11 +7,29 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveSetupStateDir } from "./lib/setup-state-dir.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const defaultRepoRoot = path.resolve(scriptDir, "..", "..", "..");
+
+export const FUSED_EMBEDDING_ARTIFACT = Object.freeze({
+  filename: "bge-small-en-v1.5-f16.gguf",
+  repo: "CompendiumLabs/bge-small-en-v1.5-gguf",
+  revision: "d32f8c040ea3b516330eeb75b72bcc2d3a780ab7",
+  sha256: "f0b2fef971e8366438bfd2d9aefea1b0115919389448806d290237f638bae999",
+  size: 67_308_128,
+});
 
 function log(message) {
   console.log(`[ensure-fused-inference] ${message}`);
@@ -41,6 +59,94 @@ function runChecked(command, args, options = {}) {
   if (result.status !== 0) {
     throw new Error(`${command} exited ${result.status ?? result.signal}`);
   }
+}
+
+export function resolveEmbeddingArtifactPath({
+  env = process.env,
+  repoRoot = defaultRepoRoot,
+} = {}) {
+  const configured = env.MODELS_DIR?.trim();
+  const modelsDir = configured
+    ? path.resolve(repoRoot, configured)
+    : path.join(resolveSetupStateDir(env), "models");
+  return path.join(modelsDir, FUSED_EMBEDDING_ARTIFACT.filename);
+}
+
+function sha256Bytes(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function validateArtifactBytes(bytes, artifact) {
+  if (bytes.byteLength !== artifact.size) {
+    throw new Error(
+      `${artifact.filename} size mismatch: expected ${artifact.size}, received ${bytes.byteLength}`,
+    );
+  }
+  const digest = sha256Bytes(bytes);
+  if (digest !== artifact.sha256) {
+    throw new Error(
+      `${artifact.filename} SHA-256 mismatch: expected ${artifact.sha256}, received ${digest}`,
+    );
+  }
+}
+
+export async function ensureEmbeddingArtifact({
+  env = process.env,
+  repoRoot = defaultRepoRoot,
+  fetchImpl = fetch,
+  artifact = FUSED_EMBEDDING_ARTIFACT,
+} = {}) {
+  const targetPath = resolveEmbeddingArtifactPath({ env, repoRoot });
+  if (existsSync(targetPath)) {
+    const current = readFileSync(targetPath);
+    if (
+      current.byteLength === artifact.size &&
+      sha256Bytes(current) === artifact.sha256
+    ) {
+      log(`embedding model is current at ${targetPath}`);
+      return { status: "ready", path: targetPath, downloaded: false };
+    }
+    log(`replacing stale embedding model at ${targetPath}`);
+  }
+
+  const url = `https://huggingface.co/${artifact.repo}/resolve/${artifact.revision}/${artifact.filename}`;
+  log(
+    `downloading ${artifact.filename} from pinned revision ${artifact.revision}`,
+  );
+  const response = await fetchImpl(url, {
+    headers: env.HF_TOKEN
+      ? { Authorization: `Bearer ${env.HF_TOKEN}` }
+      : undefined,
+    redirect: "follow",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `failed to download ${artifact.filename}: HTTP ${response.status}`,
+    );
+  }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (
+    Number.isFinite(declaredLength) &&
+    declaredLength > 0 &&
+    declaredLength !== artifact.size
+  ) {
+    throw new Error(
+      `${artifact.filename} Content-Length mismatch: expected ${artifact.size}, received ${declaredLength}`,
+    );
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  validateArtifactBytes(bytes, artifact);
+  mkdirSync(path.dirname(targetPath), { recursive: true });
+  const partialPath = `${targetPath}.partial-${process.pid}`;
+  try {
+    writeFileSync(partialPath, bytes, { mode: 0o644 });
+    renameSync(partialPath, targetPath);
+  } finally {
+    rmSync(partialPath, { force: true });
+  }
+  log(`installed verified embedding model at ${targetPath}`);
+  return { status: "ready", path: targetPath, downloaded: true };
 }
 
 function linuxPackagesMissing() {
@@ -104,7 +210,7 @@ function provisionMacPackages(run = runChecked) {
   run("brew", ["install", ...packages]);
 }
 
-export function ensureFusedInferenceInstall({
+export async function ensureFusedInferenceInstall({
   env = process.env,
   platform = process.platform,
   repoRoot = defaultRepoRoot,
@@ -114,6 +220,8 @@ export function ensureFusedInferenceInstall({
   findLinuxPackages = linuxPackagesMissing,
   provisionLinux = provisionLinuxPackages,
   provisionMac = provisionMacPackages,
+  fetchImpl = fetch,
+  ensureEmbedding = ensureEmbeddingArtifact,
 } = {}) {
   if (env.ELIZA_SKIP_FUSED_INFERENCE_SETUP === "1") {
     log("skipped by ELIZA_SKIP_FUSED_INFERENCE_SETUP=1");
@@ -141,13 +249,26 @@ export function ensureFusedInferenceInstall({
     "packages/app-core/scripts/stage-desktop-fused-lib.mjs",
   );
   run(bunExecutable, [stageScript, "--ensure"], { cwd: repoRoot, env });
-  log("fused desktop inference is installed and current");
-  return { status: "ready" };
+  const embedding = await ensureEmbedding({ env, repoRoot, fetchImpl });
+  run(
+    bunExecutable,
+    [
+      "--conditions=eliza-source",
+      path.join(
+        repoRoot,
+        "packages/app-core/scripts/verify-fused-embedding.mjs",
+      ),
+      embedding.path,
+    ],
+    { cwd: repoRoot, env },
+  );
+  log("fused desktop inference and embedding model are installed and current");
+  return { status: "ready", embedding };
 }
 
 if (import.meta.main) {
   try {
-    ensureFusedInferenceInstall();
+    await ensureFusedInferenceInstall();
   } catch (error) {
     console.error(`[ensure-fused-inference] ERROR: ${error.message}`);
     process.exit(1);

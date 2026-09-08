@@ -1,7 +1,11 @@
 /** Implements the OpenAI-compatible chat-completions boundary and its streaming accounting. */
 import { Hono } from "hono";
-import { resolveInferenceAuthStandingDenial } from "@/api-app/lib/generative-route-auth";
+import {
+  resolveInferenceAuthStandingDenial,
+  resolveInferenceCredentialAdmissionDenial,
+} from "@/api-app/lib/generative-route-auth";
 import { failureResponse } from "@/lib/api/cloud-worker-errors";
+import { deferredCredentialAdmissionGuard } from "@/lib/services/deferred-credential-admission-guard";
 import type { AppEnv } from "@/types/cloud-worker-env";
 
 /**
@@ -96,7 +100,6 @@ import type {
   CreditReconciliationResult,
   CreditReservation,
 } from "@/lib/services/credits";
-import { isInferenceAdmissionDispatchMarkError } from "@/lib/services/inference-admission-gate";
 import { inferenceRateLimitConfig } from "@/lib/services/inference-admission-snapshot";
 import type { InferenceAdmissionSnapshot } from "@/lib/services/inference-auth-cache";
 import {
@@ -104,6 +107,13 @@ import {
   resolveInferenceAuthContext,
 } from "@/lib/services/inference-auth-context";
 import { InferenceBalanceCacheWarmingError } from "@/lib/services/inference-billing-fast-path";
+import {
+  assertInferenceCredentialActive,
+  type InferenceCredentialCheck,
+  InferenceCredentialRevokedError,
+  inferenceCredentialRevocationReason,
+  isInferenceStrongRevocationEnabled,
+} from "@/lib/services/inference-credential-revocation";
 import {
   createPassthroughStreamMeter,
   isPassthroughStreamingEnabled,
@@ -117,7 +127,14 @@ import {
   getCachedGatewayModelById,
   getGatewayModelByIdCacheOnly,
 } from "@/lib/services/model-catalog";
-import { admitOrganizationInference } from "@/lib/services/organization-inference-admission";
+import {
+  admitOrganizationInference,
+  InferenceAdmissionUnavailableError,
+  InferenceAffiliateCacheUnavailableError,
+  InferenceAffiliateCacheWarmingError,
+  InferencePricingCacheUnavailableError,
+  InferencePricingCacheWarmingError,
+} from "@/lib/services/organization-inference-admission";
 import {
   getTeamPoolRegistry,
   type SelectedPooledCredential,
@@ -220,6 +237,7 @@ function buildChatPromptForBilling(request: ChatRequest): string {
 type ReasoningEffort = "none" | "low" | "medium" | "high";
 
 const CEREBRAS_REASONING_EFFORTS = {
+  "qwen-3.8-27b": ["none", "low", "medium", "high"],
   "gemma-4-31b": ["none", "low", "medium", "high"],
   "gpt-oss-120b": ["low", "medium", "high"],
   "zai-glm-4.7": ["none"],
@@ -712,7 +730,7 @@ function mapResponseFormat(responseFormat: ChatRequest["response_format"]) {
   const schema =
     responseFormat.type === "json_schema"
       ? (responseFormat.json_schema.schema ?? { type: "object" })
-      : { type: "object", additionalProperties: true };
+      : undefined;
   const name =
     responseFormat.type === "json_schema"
       ? responseFormat.json_schema.name
@@ -726,7 +744,9 @@ function mapResponseFormat(responseFormat: ChatRequest["response_format"]) {
     name: "object",
     responseFormat: Promise.resolve({
       type: "json" as const,
-      schema,
+      // An absent schema preserves JSON-object mode in the provider SDK.
+      // Supplying a permissive object schema instead requests strict structured output.
+      ...(schema ? { schema } : {}),
       ...(name ? { name } : {}),
       ...(description ? { description } : {}),
     }),
@@ -737,6 +757,7 @@ function mapResponseFormat(responseFormat: ChatRequest["response_format"]) {
       try {
         return { partial: JSON.parse(text) };
       } catch {
+        // error-policy:J3 incomplete streamed JSON has no parsed partial value.
         return undefined;
       }
     },
@@ -745,9 +766,6 @@ function mapResponseFormat(responseFormat: ChatRequest["response_format"]) {
     },
   };
 
-  if (responseFormat.type === "json_object") {
-    return output;
-  }
   return output;
 }
 
@@ -1164,6 +1182,30 @@ interface ChatCompletionsHandlerOptions {
   executionCtx?: { waitUntil(promise: Promise<unknown>): void };
 }
 
+type ConcurrentPromiseOutcome<T> =
+  | { kind: "fulfilled"; value: T }
+  | { kind: "rejected"; error: unknown };
+
+/**
+ * Installs a rejection handler at task creation time while retaining the
+ * original failure for the point where route precedence permits observing it.
+ * This matters when a faster validation or rate-limit denial returns before
+ * another overlapped task settles.
+ */
+function observeConcurrentPromise<T>(
+  promise: Promise<T>,
+): Promise<ConcurrentPromiseOutcome<T>> {
+  return promise.then(
+    (value) => ({ kind: "fulfilled", value }),
+    (error: unknown) => ({ kind: "rejected", error }),
+  );
+}
+
+function unwrapConcurrentPromise<T>(outcome: ConcurrentPromiseOutcome<T>): T {
+  if (outcome.kind === "rejected") throw outcome.error;
+  return outcome.value;
+}
+
 export async function handleChatCompletionsPOST(
   req: Request,
   options: ChatCompletionsHandlerOptions = {},
@@ -1207,20 +1249,53 @@ export async function handleChatCompletionsPOST(
   let promptCacheKeyForRedaction: string | undefined;
 
   try {
+    const request = (await req.json().catch(() => null)) as ChatRequest | null;
+    const requestIsValid = Boolean(
+      request?.model &&
+        Array.isArray(request.messages) &&
+        request.messages.length,
+    );
+    const invalidRequestResponse = !requestIsValid
+      ? attachPreforwardTelemetry(
+          addCorsHeaders(
+            Response.json(
+              {
+                error: {
+                  message: "Missing required fields: model and messages",
+                  type: "invalid_request_error",
+                  code: "missing_required_parameter",
+                },
+              },
+              { status: 400 },
+            ),
+          ),
+        )
+      : undefined;
+
     // 1. Authenticate (+ moderation). API-key and Steward-session requests
-    // resolve auth + org + moderation from a combined cache decision. Cold
-    // Workers schedule authoritative hydration and return a retryable response;
-    // only non-Worker callers may join that hydration inline.
+    // resolve auth + org + moderation from a combined cache decision. On one
+    // true cold miss, Workers may consume the retained authoritative decision
+    // under a bounded deadline; its cache projection remains off-path.
     let user: { id: string; organization_id: string };
     let apiKey: { id: string } | null;
     let moderationAlreadyChecked = false;
     let admissionSnapshot: InferenceAdmissionSnapshot | undefined;
+    let admissionCredential: InferenceCredentialCheck | undefined;
     let appScopeId: string | null = null;
+    await using credentialGuard = deferredCredentialAdmissionGuard({
+      organizationId: () => user?.organization_id,
+      credential: () => admissionCredential,
+    });
 
+    const deferStrongCredentialCheck =
+      requestIsValid &&
+      Boolean(options.executionCtx) &&
+      isInferenceStrongRevocationEnabled();
     const resolution = await resolveInferenceAuthContext(req, {
       traceId,
       executionCtx: options.executionCtx,
       cacheOnly: Boolean(options.executionCtx),
+      deferStrongCredentialCheck,
       onTelemetry: (telemetry) => {
         authTelemetry = telemetry;
       },
@@ -1295,6 +1370,7 @@ export async function handleChatCompletionsPOST(
       };
       apiKey = resolution.ctx.apiKeyId ? { id: resolution.ctx.apiKeyId } : null;
       admissionSnapshot = resolution.ctx.admission;
+      admissionCredential = resolution.credential;
       appScopeId =
         "appScopeId" in resolution.ctx ? resolution.ctx.appScopeId : null;
       // The resolver already verified not-suspended (cache hit = at populate;
@@ -1328,28 +1404,27 @@ export async function handleChatCompletionsPOST(
     // catches any regression before a provider invocation.
     const tAuth = performance.now();
 
-    // 1b. Per-org tier rate limit. Start it beside body parsing: rate-limit
-    // still wins over malformed bodies, matching the pre-existing gate order.
-    const orgRateLimitPromise =
+    // 1b. Per-org tier rate limit. Start the authoritative decision now, then
+    // overlap it with the independent cache-only preparation below. We still
+    // inspect and return this result first, preserving the existing denial
+    // precedence without serializing an unrelated Durable Object round trip
+    // ahead of every dependency read.
+    const orgRateLimitPromise = observeConcurrentPromise(
       user.organization_id && !options.skipOrgRateLimit
         ? enforceOrgRateLimit(user.organization_id, "completions", {
             cacheOnly: Boolean(options.executionCtx),
             executionCtx: options.executionCtx,
             config: inferenceRateLimitConfig(admissionSnapshot, "completions"),
           })
-        : Promise.resolve(null);
-    const requestPromise = req
-      .json()
-      // error-policy:J3 malformed JSON becomes the same typed invalid request path as a missing body.
-      .catch(() => null) as Promise<ChatRequest | null>;
-
-    let orgRateLimited: Response | null;
-    try {
-      orgRateLimited = await orgRateLimitPromise;
-    } catch (error) {
-      if (error instanceof OrgRateLimitCacheNotReadyError) {
-        return attachPreforwardTelemetry(
-          addCorsHeaders(
+        : Promise.resolve(null),
+    );
+    const resolveOrgRateLimit = async (): Promise<Response | null> => {
+      const outcome = await orgRateLimitPromise;
+      try {
+        return unwrapConcurrentPromise(outcome);
+      } catch (error) {
+        if (error instanceof OrgRateLimitCacheNotReadyError) {
+          return addCorsHeaders(
             Response.json(
               {
                 error: {
@@ -1361,12 +1436,34 @@ export async function handleChatCompletionsPOST(
               },
               { status: 503, headers: { "Retry-After": "1" } },
             ),
-          ),
-        );
+          );
+        }
+        throw error;
       }
-      throw error;
+    };
+    const captureEarlyPreforwardTiming = (): void => {
+      if (preforwardTiming) return;
+      const stoppedAt = performance.now();
+      preforwardTiming = snapshotGatewayPreforwardTiming({
+        authMs: tAuth - telemetryStartedAt,
+        middleMs: stoppedAt - tAuth,
+        reserveMs: 0,
+        setupMs: 0,
+        totalMs: stoppedAt - telemetryStartedAt,
+      });
+    };
+
+    if (
+      !request?.model ||
+      !Array.isArray(request.messages) ||
+      !request.messages.length
+    ) {
+      const orgRateLimited = await resolveOrgRateLimit();
+      captureEarlyPreforwardTiming();
+      return attachPreforwardTelemetry(
+        orgRateLimited ?? invalidRequestResponse!,
+      );
     }
-    if (orgRateLimited) return orgRateLimited;
 
     // 2. Prepare app monetization lookup
     const requestedAppId = options.requiredAppId ?? req.headers.get("X-App-Id");
@@ -1394,30 +1491,6 @@ export async function handleChatCompletionsPOST(
     // (and echoes the raw parse text); the sibling agents routes already guard
     // this. Also require `messages` to be an ARRAY so a non-array value can't
     // slip past the length check and TypeError later in `messages.filter(...)`.
-    const request = await requestPromise;
-
-    // 4. Validate
-    if (
-      !request?.model ||
-      !Array.isArray(request.messages) ||
-      !request.messages.length
-    ) {
-      return attachPreforwardTelemetry(
-        addCorsHeaders(
-          Response.json(
-            {
-              error: {
-                message: "Missing required fields: model and messages",
-                type: "invalid_request_error",
-                code: "missing_required_parameter",
-              },
-            },
-            { status: 400 },
-          ),
-        ),
-      );
-    }
-
     // Collapse decorated Cerebras ids (e.g. "openai/gpt-oss-120b:nitro" emitted
     // by dedicated agents) to the bare Cerebras id so pricing, routing, and
     // billing all agree and route to cerebras-direct instead of OpenRouter.
@@ -1508,7 +1581,11 @@ export async function handleChatCompletionsPOST(
       executionCtx: options.executionCtx,
     });
     const modelCatalogPromise = skipCatalogLookup
-      ? Promise.resolve({ kind: "ready" as const, model: null })
+      ? Promise.resolve({
+          kind: "ready" as const,
+          model: null,
+          stale: false,
+        })
       : options.executionCtx
         ? getGatewayModelByIdCacheOnly(model, {
             executionCtx: options.executionCtx,
@@ -1517,6 +1594,7 @@ export async function handleChatCompletionsPOST(
             .then((catalogModel) => ({
               kind: "ready" as const,
               model: catalogModel,
+              stale: false,
             }))
             // error-policy:J4 non-Worker tools retain the explicit
             // name-pattern fallback when optional catalog metadata fails.
@@ -1528,7 +1606,11 @@ export async function handleChatCompletionsPOST(
                   error: error instanceof Error ? error.message : String(error),
                 },
               );
-              return { kind: "ready" as const, model: null };
+              return {
+                kind: "ready" as const,
+                model: null,
+                stale: false,
+              };
             });
     const shouldBlockUserPromise = moderationAlreadyChecked
       ? Promise.resolve({ kind: "ready" as const, blocked: false })
@@ -1539,18 +1621,30 @@ export async function handleChatCompletionsPOST(
         : contentModerationService
             .shouldBlockUser(user.id)
             .then((blocked) => ({ kind: "ready" as const, blocked }));
+    // Promise.all attaches a rejection observer to every input immediately and
+    // remains fail-fast. Wrapping the aggregate records that failure until the
+    // rate-limit verdict has been applied, including 429 and early-return paths.
+    const dependencyResolutionsPromise = observeConcurrentPromise(
+      Promise.all([
+        monetizedAppPromise,
+        pooledCredentialPromise,
+        modelCatalogPromise,
+        shouldBlockUserPromise,
+      ]),
+    );
+
+    const orgRateLimited = await resolveOrgRateLimit();
+    if (orgRateLimited) {
+      captureEarlyPreforwardTiming();
+      return attachPreforwardTelemetry(orgRateLimited);
+    }
 
     const [
       appResolution,
       pooledCredentialResolution,
       modelCatalogResolution,
       moderationResolution,
-    ] = await Promise.all([
-      monetizedAppPromise,
-      pooledCredentialPromise,
-      modelCatalogPromise,
-      shouldBlockUserPromise,
-    ]);
+    ] = unwrapConcurrentPromise(await dependencyResolutionsPromise);
     if (
       appResolution.kind !== "ready" ||
       pooledCredentialResolution.kind !== "ready" ||
@@ -1708,6 +1802,12 @@ export async function handleChatCompletionsPOST(
           useMonetizedAppBilling,
         })
       ) {
+        if (admissionCredential) {
+          await assertInferenceCredentialActive(
+            user.organization_id,
+            admissionCredential,
+          );
+        }
         settleReservation = async () => null;
         settleUnknown = async () => null;
       } else if (useAppCredits && appId && monetizedApp) {
@@ -1749,6 +1849,8 @@ export async function handleChatCompletionsPOST(
             affiliateCode,
             executionCtx: options.executionCtx,
             admissionSnapshot,
+            credential: credentialGuard.credentialForAdmission(),
+            atomicProviderBoundary: true,
           });
           settleReservation = admission.settle;
           settleUnknown = admission.settleUnknown;
@@ -1785,6 +1887,8 @@ export async function handleChatCompletionsPOST(
           affiliateCode,
           executionCtx: options.executionCtx,
           admissionSnapshot,
+          credential: credentialGuard.credentialForAdmission(),
+          atomicProviderBoundary: Boolean(options.executionCtx),
         });
         settleReservation = admission.settle;
         settleUnknown = admission.settleUnknown;
@@ -1792,6 +1896,41 @@ export async function handleChatCompletionsPOST(
         billingReservation = admission.reservation;
       }
     } catch (error) {
+      const failedAt = performance.now();
+      preforwardTiming ??= snapshotGatewayPreforwardTiming({
+        authMs: tAuth - telemetryStartedAt,
+        middleMs: tBeforeReserve - tAuth,
+        reserveMs: failedAt - tBeforeReserve,
+        setupMs: 0,
+        totalMs: failedAt - telemetryStartedAt,
+      });
+      if (error instanceof InferenceCredentialRevokedError) {
+        const reason = inferenceCredentialRevocationReason(error.reason);
+        const denial = resolveInferenceAuthStandingDenial(
+          reason === "moderation_blocked" ||
+            reason === "organization_inactive" ||
+            reason === "account_inactive" ||
+            reason === "membership_missing"
+            ? { kind: "suspended", reason }
+            : { kind: "rejected", status: 401, reason },
+          { route: "chat_completions", traceId },
+        );
+        return attachPreforwardTelemetry(
+          addCorsHeaders(
+            Response.json(
+              {
+                error: {
+                  message: denial.message,
+                  type: denial.type,
+                  code: denial.code,
+                  details: { reason: denial.reason },
+                },
+              },
+              { status: denial.status },
+            ),
+          ),
+        );
+      }
       if (error instanceof InferenceAppAffiliateUnsupportedError) {
         return addCorsHeaders(
           Response.json(
@@ -1822,21 +1961,85 @@ export async function handleChatCompletionsPOST(
           ),
         );
       }
+      if (error instanceof InferenceAdmissionUnavailableError) {
+        logger.error(
+          "[Chat Completions] inference admission transport failed closed",
+          {
+            traceId,
+            requestId,
+            organizationId: user.organization_id,
+            userId: user.id,
+            model,
+            provider,
+            billingSource,
+            phase: "reserve",
+            errorName: error.name,
+            error: error.message,
+            cause:
+              error.cause instanceof Error
+                ? `${error.cause.name}: ${error.cause.message}`
+                : error.cause === undefined
+                  ? undefined
+                  : String(error.cause),
+          },
+        );
+        return attachPreforwardTelemetry(
+          addCorsHeaders(
+            Response.json(
+              {
+                error: {
+                  message:
+                    "Inference admission is temporarily unavailable. Retry shortly.",
+                  type: "service_unavailable",
+                  code: "inference_admission_unavailable",
+                },
+              },
+              { status: 503, headers: { "Retry-After": "1" } },
+            ),
+          ),
+        );
+      }
       if (
         error instanceof InferenceBalanceCacheWarmingError ||
         error instanceof AiPricingCacheWarmingError ||
         error instanceof AiPricingCacheUnavailableError
       ) {
-        return addCorsHeaders(
-          Response.json(
-            {
-              error: {
-                message: "Billing authorization is warming. Retry shortly.",
-                type: "service_unavailable",
-                code: "billing_cache_warming",
+        const dependency =
+          error instanceof InferencePricingCacheWarmingError ||
+          error instanceof InferencePricingCacheUnavailableError ||
+          error instanceof AiPricingCacheWarmingError ||
+          error instanceof AiPricingCacheUnavailableError
+            ? "pricing"
+            : error instanceof InferenceAffiliateCacheWarmingError ||
+                error instanceof InferenceAffiliateCacheUnavailableError
+              ? "affiliate_policy"
+              : "balance";
+        logger.warn("[Chat Completions] billing dependency failed closed", {
+          traceId,
+          requestId,
+          organizationId: user.organization_id,
+          userId: user.id,
+          model,
+          provider,
+          billingSource,
+          phase: "reserve",
+          dependency,
+          errorName: error.name,
+          error: error.message,
+        });
+        return attachPreforwardTelemetry(
+          addCorsHeaders(
+            Response.json(
+              {
+                error: {
+                  message: "Billing authorization is warming. Retry shortly.",
+                  type: "service_unavailable",
+                  code: "billing_cache_warming",
+                  details: { dependency },
+                },
               },
-            },
-            { status: 503 },
+              { status: 503, headers: { "Retry-After": "1" } },
+            ),
           ),
         );
       }
@@ -1978,6 +2181,64 @@ export async function handleChatCompletionsPOST(
         await settleReservation?.(0);
       }
     });
+    const credentialDenial = resolveInferenceCredentialAdmissionDenial(error, {
+      route: "chat_completions",
+      traceId,
+    });
+    if (credentialDenial) {
+      return attachPreforwardTelemetry(
+        addCorsHeaders(
+          Response.json(
+            {
+              error: {
+                message: credentialDenial.message,
+                type: credentialDenial.type,
+                code: credentialDenial.code,
+                details: { reason: credentialDenial.reason },
+              },
+            },
+            { status: credentialDenial.status },
+          ),
+        ),
+      );
+    }
+    if (
+      error instanceof InferenceAdmissionUnavailableError ||
+      error instanceof InferenceBalanceCacheWarmingError
+    ) {
+      logger.error(
+        "[Chat Completions] provider-boundary admission failed closed",
+        {
+          traceId,
+          requestId,
+          model,
+          phase: "provider_dispatch",
+          errorName: error.name,
+          error: error.message,
+          cause:
+            error.cause instanceof Error
+              ? `${error.cause.name}: ${error.cause.message}`
+              : error.cause === undefined
+                ? undefined
+                : String(error.cause),
+        },
+      );
+      return attachPreforwardTelemetry(
+        addCorsHeaders(
+          Response.json(
+            {
+              error: {
+                message:
+                  "Inference admission is temporarily unavailable. Retry shortly.",
+                type: "service_unavailable",
+                code: "inference_admission_unavailable",
+              },
+            },
+            { status: 503, headers: { "Retry-After": "1" } },
+          ),
+        ),
+      );
+    }
     const rawMessage = redactPromptCacheKey(
       error instanceof Error ? error.message : String(error),
       promptCacheKeyForRedaction,
@@ -2464,24 +2725,30 @@ async function tryPassthroughStreamingRequest(params: {
       () => fetch(upstream.url, upstreamInit),
     );
   } catch (error) {
-    // A failed dispatch marker proves this Worker never called the provider,
-    // even when the Durable Object committed but every acknowledgement was
-    // lost. Once fetch starts, transport failure remains ambiguous.
+    if (upstreamFetchStartedAt === 0) {
+      // The combined admission failed before fetch. Preserve its typed
+      // standing, balance, or transport decision for the route boundary; the
+      // outer zero settlement cancels any acknowledgement-ambiguous commit.
+      throw error;
+    }
+    // Once fetch starts, transport failure is ambiguous and retains the
+    // estimate. Admission failures returned above are handled by the route's
+    // zero-settlement path because the provider boundary was never crossed.
     await settleOffResponsePath(params.executionCtx, async () => {
-      if (isInferenceAdmissionDispatchMarkError(error)) {
-        await params.settleReservation(0);
-      } else {
-        await params.settleUnknown();
-      }
+      await params.settleUnknown();
     });
     logger.error("[Chat Completions] Passthrough upstream fetch failed", {
       model,
       provider: upstream.providerId,
+      traceId: params.traceId,
       error: error instanceof Error ? error.message : String(error),
     });
     return passthroughErrorResponse(503, "upstream provider request failed");
   }
 
+  const providerRequestId = sanitizeProviderRequestId(
+    upstreamResponse.headers.get("x-request-id"),
+  );
   if (!upstreamResponse.ok) {
     await settleOffResponsePath(params.executionCtx, async () => {
       if (isKnownUnacceptedProviderStatus(upstreamResponse.status)) {
@@ -2516,6 +2783,8 @@ async function tryPassthroughStreamingRequest(params: {
     logger.error("[Chat Completions] Passthrough upstream error status", {
       model,
       provider: upstream.providerId,
+      traceId: params.traceId,
+      ...(providerRequestId ? { providerRequestId } : {}),
       upstreamStatus: upstreamResponse.status,
       mappedStatus: status,
     });
@@ -2527,7 +2796,12 @@ async function tryPassthroughStreamingRequest(params: {
     });
     logger.error(
       "[Chat Completions] Passthrough upstream returned an accepted response without a stream body",
-      { model, provider: upstream.providerId },
+      {
+        model,
+        provider: upstream.providerId,
+        traceId: params.traceId,
+        ...(providerRequestId ? { providerRequestId } : {}),
+      },
     );
     return passthroughErrorResponse(
       503,
@@ -2540,9 +2814,6 @@ async function tryPassthroughStreamingRequest(params: {
   // arbitrary upstream header content (same character policy as Server-Timing
   // descriptions).
   const upstreamHeadersMs = round2(performance.now() - upstreamFetchStartedAt);
-  const providerRequestId = sanitizeProviderRequestId(
-    upstreamResponse.headers.get("x-request-id"),
-  );
   // Single-reader fan-out (#20032 defect 4): the client stream is the ONLY
   // consumer of the upstream body, and the meter observes each chunk
   // synchronously as it is forwarded. Upstream pulling is therefore bounded
@@ -3788,6 +4059,7 @@ function toOpenAiFinishReason(
 }
 
 export const __nativeToolingTestHooks = {
+  mapResponseFormat,
   mapToolChoice,
   convertTools,
   computeEffectiveMaxTokens,

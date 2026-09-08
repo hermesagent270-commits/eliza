@@ -2,7 +2,10 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  canonicalContainerNameSha256,
+  diagnoseRereviewTarget,
   PersonalDedicatedRereviewOperatorError,
+  previewDecisionEvidence,
   type RereviewOperatorConfig,
   type RereviewOperatorDependencies,
   readRereviewOperatorConfig,
@@ -10,6 +13,40 @@ import {
   resolveReceiptRow,
   runRereviewOperator,
 } from "./personal-dedicated-rereview-staging";
+import { summarizeJournal } from "./staging-worker-diagnostic.mjs";
+
+test("account preview correlation selects the same canonical container in worker evidence without exposing its identity", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111111";
+  const otherId = "22222222-2222-4222-8222-222222222222";
+  const { getContainerName } = await import(
+    "@elizaos/cloud-shared/lib/services/docker-sandbox-utils"
+  );
+  const selectedName = getContainerName(agentId);
+  const otherName = getContainerName(otherId);
+  const digest = await canonicalContainerNameSha256(agentId);
+  const messages = [
+    `[docker-sandbox] Docker health check timed out after 60s for ${selectedName} on private-host`,
+    `[docker-sandbox] Docker health check timed out after 60s for ${otherName} on private-host`,
+    `[docker-sandbox] Health timeout diagnostics {\n  containerName: ${JSON.stringify(selectedName)},\n  nodeId: "private-node",\n  diagnostics: ${JSON.stringify("--- inspect ---\nstate=exited health=unhealthy exit=137 error=\n--- authkey marker ---\n--- logs ---\nOutOfMemory private-data\n")},\n}`,
+  ];
+  const result = summarizeJournal(
+    messages.map((MESSAGE) => JSON.stringify({ MESSAGE })).join("\n"),
+    digest,
+  );
+  expect(result.counts.docker_health_timeout).toBe(2);
+  expect(result.targetHealthTimeouts.docker).toBe(1);
+  expect(result.healthTimeouts.target.frames).toBe(1);
+  expect(result.healthTimeouts.target.observations[0].exitCode).toBe(137);
+  expect(
+    result.healthTimeouts.target.observations[0].bootSignals.out_of_memory,
+  ).toBe(true);
+  expect(JSON.stringify(result)).not.toContain(agentId);
+  expect(JSON.stringify(result)).not.toContain(otherId);
+  expect(JSON.stringify(result)).not.toContain("private");
+  await expect(
+    canonicalContainerNameSha256("private-invalid-identity"),
+  ).rejects.toMatchObject({ code: "container_correlation_identity_invalid" });
+});
 
 const resolved = {
   organizationId: "10000000-0000-4000-8000-000000000001",
@@ -19,7 +56,10 @@ const resolved = {
   operation: "rereview" as const,
 };
 const preview = {
+  operation: "rereview" as const,
   receiptFingerprint: "a".repeat(64),
+  receiptUpdatedAt: "2026-08-30T12:00:00.000Z",
+  previousRetainedAgentId: resolved.retainedAgentId,
   inventoryFingerprint: "b".repeat(64),
   stateDisposition: "fresh_boot_no_verified_backup" as const,
   candidateCount: 2,
@@ -30,6 +70,15 @@ const snapshot = {
   agentDigest: "c".repeat(64),
   jobCount: 0,
   jobDigest: "d".repeat(64),
+  selectedTarget: diagnoseRereviewTarget({
+    status: "stopped",
+    database_status: "ready",
+    error_message: null,
+    sandbox_id: null,
+    bridge_url: null,
+    docker_image: null,
+    image_digest: null,
+  }),
 };
 
 function config(mode: "preview" | "execute"): RereviewOperatorConfig {
@@ -47,6 +96,7 @@ function dependencies(overrides: Partial<RereviewOperatorDependencies> = {}) {
     | undefined;
   const value: RereviewOperatorDependencies = {
     verifyDeployment: async () => {},
+    reportAccountLifecycle: async () => {},
     resolveSelection: async () => resolved,
     preview: async () => preview,
     execute: async (input) => {
@@ -64,6 +114,151 @@ function dependencies(overrides: Partial<RereviewOperatorDependencies> = {}) {
 }
 
 describe("personal Dedicated staging re-review operator", () => {
+  test("reports lifecycle before a missing selection prevents review", async () => {
+    const events: string[] = [];
+    const deps = dependencies({
+      verifyDeployment: async () => {
+        events.push("deployment verified");
+      },
+      reportAccountLifecycle: async () => {
+        events.push("lifecycle reported");
+      },
+      resolveSelection: async () => {
+        throw new PersonalDedicatedRereviewOperatorError(
+          "selection_bootstrap_zero_candidates",
+        );
+      },
+    });
+    await expect(
+      runRereviewOperator(config("preview"), deps.value),
+    ).rejects.toThrow("selection_bootstrap_zero_candidates");
+    expect(events).toEqual(["deployment verified", "lifecycle reported"]);
+    expect(deps.executeCalls()).toBe(0);
+  });
+
+  test("reports a provisioning failure without returning raw errors or locators", async () => {
+    const privateLocator = "https://private-host.invalid/private-agent";
+    const selectedTarget = diagnoseRereviewTarget({
+      status: "error",
+      database_status: "ready",
+      error_message: `Headscale routing is required but HEADSCALE_API_KEY is not configured ${privateLocator}`,
+      sandbox_id: "private-container-id",
+      bridge_url: privateLocator,
+      docker_image: "private.registry.invalid/private-agent:secret-tag",
+      image_digest: "private-digest-value",
+    });
+    const result = await runRereviewOperator(
+      config("preview"),
+      dependencies({
+        snapshot: async () => ({ ...snapshot, selectedTarget }),
+      }).value,
+    );
+    expect(result.selectedTarget.provisionFailure).toBe(
+      "ingress_headscale_not_configured",
+    );
+    expect(JSON.stringify(result)).not.toContain(privateLocator);
+    expect(JSON.stringify(result)).not.toContain("private-container-id");
+    expect(JSON.stringify(result)).not.toContain("private.registry.invalid");
+    expect(JSON.stringify(result)).not.toContain("secret-tag");
+    expect(JSON.stringify(result)).not.toContain("private-digest-value");
+    expect(result.selectedTarget.imageFamily).toBe("custom");
+    expect(() =>
+      diagnoseRereviewTarget({
+        status: privateLocator,
+        database_status: "ready",
+        error_message: null,
+        sandbox_id: null,
+        bridge_url: null,
+        docker_image: null,
+        image_digest: null,
+      }),
+    ).toThrow("selected_target_status_invalid");
+  });
+
+  test("publishes only validated official image digests through the operator evidence", async () => {
+    const digest = `sha256:${"a".repeat(64)}`;
+    for (const [image, family, referenceDigest, recordedDigest] of [
+      [`ghcr.io/elizaos/eliza@${digest}`, "canonical", digest, digest],
+      ["ghcr.io/elizaos/eliza-demo:develop", "demo", null, digest],
+      ["ghcr.io/elizaos/eliza-private:secret", "custom", null, null],
+      ["ghcr.io/elizaos/eliza@sha256:private-value", "custom", null, null],
+      ["ghcr.io/elizaos/eliza:tag/private-value", "custom", null, null],
+      [null, "unconfigured", null, null],
+    ] as const) {
+      const selectedTarget = diagnoseRereviewTarget({
+        status: "error",
+        database_status: "ready",
+        error_message: "Provisioning timeout",
+        sandbox_id: null,
+        bridge_url: null,
+        docker_image: image,
+        image_digest: digest,
+      });
+      const result = await runRereviewOperator(
+        config("preview"),
+        dependencies({
+          snapshot: async () => ({ ...snapshot, selectedTarget }),
+        }).value,
+      );
+      expect(result.selectedTarget.imageFamily).toBe(family);
+      expect(result.selectedTarget.publicImageReferenceDigest).toBe(
+        referenceDigest,
+      );
+      expect(result.selectedTarget.publicRecordedImageDigest).toBe(
+        recordedDigest,
+      );
+      expect(JSON.stringify(result)).not.toContain("private-value");
+      expect(JSON.stringify(result)).not.toContain("secret");
+    }
+    const invalidRecordedDigest = diagnoseRereviewTarget({
+      status: "error",
+      database_status: "ready",
+      error_message: null,
+      sandbox_id: null,
+      bridge_url: null,
+      docker_image: "ghcr.io/elizaos/eliza:develop",
+      image_digest: "private-invalid-digest",
+    });
+    expect(JSON.stringify(invalidRecordedDigest)).not.toContain(
+      "private-invalid-digest",
+    );
+    expect(invalidRecordedDigest.publicRecordedImageDigest).toBeNull();
+  });
+
+  test("distinguishes sandbox readiness expiry without interpreting stack paths as failures", async () => {
+    for (const [error, expected] of [
+      [
+        "Sandbox health check timed out; private-host.invalid/private-agent",
+        true,
+      ],
+      ["Provision failed\ncaused by: Sandbox health check timed out", true],
+      [
+        "Job execution timeout\n    at Sandbox health check timed out (/private/path)",
+        false,
+      ],
+      [null, false],
+    ] as const) {
+      const selectedTarget = diagnoseRereviewTarget({
+        status: "error",
+        database_status: "ready",
+        error_message: error,
+        sandbox_id: null,
+        bridge_url: null,
+        docker_image: null,
+        image_digest: null,
+      });
+      const result = await runRereviewOperator(
+        config("preview"),
+        dependencies({
+          snapshot: async () => ({ ...snapshot, selectedTarget }),
+        }).value,
+      );
+      expect(result.selectedTarget.sandboxHealthCheckTimedOut).toBe(expected);
+      expect(JSON.stringify(result)).not.toContain("private-host");
+      expect(JSON.stringify(result)).not.toContain("/private/path");
+    }
+  });
+
   test("classifies zero, one, and invariant-breaking receipt counts", () => {
     expect(resolveReceiptRow([])).toBeNull();
     expect(resolveReceiptRow([{ retainedAgentId: "retained" }])).toEqual({
@@ -93,7 +288,7 @@ describe("personal Dedicated staging re-review operator", () => {
         })),
         (candidate) => candidate.authority,
       ),
-    ).toThrow("selection_bootstrap_decision_required");
+    ).toThrow("selection_bootstrap_no_restore_authority");
     expect(() =>
       resolveBootstrapCandidate(
         candidates.map((candidate) => ({
@@ -102,13 +297,50 @@ describe("personal Dedicated staging re-review operator", () => {
         })),
         (candidate) => candidate.authority,
       ),
-    ).toThrow("selection_bootstrap_decision_required");
+    ).toThrow("selection_bootstrap_multiple_restore_authorities");
     expect(() =>
       resolveBootstrapCandidate(
         [candidates[1]],
         (candidate) => candidate.authority,
       ),
-    ).toThrow("selection_bootstrap_decision_required");
+    ).toThrow("selection_bootstrap_single_candidate");
+    expect(() => resolveBootstrapCandidate([], () => "fresh-boot")).toThrow(
+      "selection_bootstrap_zero_candidates",
+    );
+    expect(() =>
+      resolveBootstrapCandidate(
+        Array.from({ length: 101 }, (_, index) => ({
+          id: String(index),
+          authority: index === 0 ? "from-legacy-backup" : "fresh-boot",
+        })),
+        (candidate) => candidate.authority,
+      ),
+    ).toThrow("selection_bootstrap_inventory_over_limit");
+  });
+
+  test("reports expected preview decisions neutrally without weakening execute", () => {
+    const codes = [
+      "selection_bootstrap_zero_candidates",
+      "selection_bootstrap_single_candidate",
+      "selection_bootstrap_inventory_over_limit",
+      "selection_bootstrap_no_restore_authority",
+      "selection_bootstrap_multiple_restore_authorities",
+    ] as const;
+    for (const code of codes) {
+      expect(previewDecisionEvidence("preview", code)).toEqual({
+        schemaVersion: 1,
+        mode: "preview",
+        decisionRequired: true,
+        decisionCode: code,
+        computeMutation: false,
+        executed: false,
+      });
+      expect(previewDecisionEvidence("execute", code)).toBeNull();
+    }
+    expect(
+      previewDecisionEvidence("preview", "staging_deploy_commit_mismatch"),
+    ).toBeNull();
+    expect(previewDecisionEvidence(undefined, codes[0])).toBeNull();
   });
 
   test("returns identifier-free preview evidence and does not execute", async () => {
@@ -126,8 +358,9 @@ describe("personal Dedicated staging re-review operator", () => {
       computeMutation: false,
       executed: false,
     });
+    expect(result.approvalDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(result.approvalDigest).toBe(
-      "86e1e6cfcbf44c955692befd07da569116c9dc04b69703f067aca3c65a36eedd",
+      "682dad005890516a420f15f8ebbf693d997ca588192cd073003dab78c112ccc6",
     );
     expect(deps.executeCalls()).toBe(0);
     for (const privateValue of [
@@ -160,6 +393,8 @@ describe("personal Dedicated staging re-review operator", () => {
     expect(deps.executedInput()).toMatchObject({
       operation: "rereview",
       expectedReceiptFingerprint: preview.receiptFingerprint,
+      expectedReceiptUpdatedAt: preview.receiptUpdatedAt,
+      expectedPreviousRetainedAgentId: preview.previousRetainedAgentId,
     });
 
     await expect(
@@ -174,11 +409,23 @@ describe("personal Dedicated staging re-review operator", () => {
         deps.value,
       ),
     ).rejects.toMatchObject({ code: "exact_confirmation_required" });
+    await expect(
+      runRereviewOperator(
+        { ...executeConfig, reviewedReason: "retain_something_else" },
+        deps.value,
+      ),
+    ).rejects.toMatchObject({ code: "reviewed_reason_required" });
   });
 
   test("uses a distinct digest-bound confirmation for missing-receipt bootstrap", async () => {
     const bootstrapResolved = { ...resolved, operation: "bootstrap" as const };
-    const bootstrapPreview = { ...preview, receiptFingerprint: null };
+    const bootstrapPreview = {
+      ...preview,
+      operation: "bootstrap" as const,
+      receiptFingerprint: null,
+      receiptUpdatedAt: null,
+      previousRetainedAgentId: null,
+    };
     const deps = dependencies({
       resolveSelection: async () => bootstrapResolved,
       preview: async () => bootstrapPreview,
@@ -191,6 +438,9 @@ describe("personal Dedicated staging re-review operator", () => {
       requiredConfirmation:
         "SELECT_UNIQUE_VERIFIED_BACKUP_WITHOUT_COMPUTE_MUTATION",
     });
+    expect(prior.approvalDigest).toBe(
+      "fe92cc0a9931097bdbc5a9ea486dc2b779dd63c91978ae077cd958208796fe17",
+    );
 
     const result = await runRereviewOperator(
       {
@@ -207,6 +457,8 @@ describe("personal Dedicated staging re-review operator", () => {
     expect(deps.executedInput()).toMatchObject({
       operation: "bootstrap",
       expectedReceiptFingerprint: null,
+      expectedReceiptUpdatedAt: null,
+      expectedPreviousRetainedAgentId: null,
       expectedInventoryFingerprint: preview.inventoryFingerprint,
       expectedStateDisposition: preview.stateDisposition,
     });
@@ -223,6 +475,73 @@ describe("personal Dedicated staging re-review operator", () => {
         deps.value,
       ),
     ).rejects.toMatchObject({ code: "exact_confirmation_required" });
+  });
+
+  test("binds every resolved selector and replacement decision into approval", async () => {
+    const baseline = await runRereviewOperator(
+      config("preview"),
+      dependencies().value,
+    );
+    const changedDependencies = [
+      dependencies({
+        resolveSelection: async () => ({
+          ...resolved,
+          organizationId: "10000000-0000-4000-8000-000000000009",
+        }),
+      }),
+      dependencies({
+        resolveSelection: async () => ({
+          ...resolved,
+          userId: "20000000-0000-4000-8000-000000000009",
+        }),
+      }),
+      dependencies({
+        resolveSelection: async () => ({
+          ...resolved,
+          sourceAgentId: "personal-shared-other-source",
+        }),
+      }),
+      dependencies({
+        resolveSelection: async () => ({
+          ...resolved,
+          retainedAgentId: "30000000-0000-4000-8000-000000000009",
+        }),
+      }),
+      dependencies({
+        preview: async () => ({ ...preview, replacesTarget: true }),
+      }),
+    ];
+
+    for (const changed of changedDependencies) {
+      const result = await runRereviewOperator(
+        config("preview"),
+        changed.value,
+      );
+      expect(result.approvalDigest).not.toBe(baseline.approvalDigest);
+    }
+  });
+
+  test("rejects a preview for a different operation before snapshot or execute", async () => {
+    let snapshots = 0;
+    await expect(
+      runRereviewOperator(
+        config("preview"),
+        dependencies({
+          preview: async () => ({
+            ...preview,
+            operation: "bootstrap",
+            receiptFingerprint: null,
+            receiptUpdatedAt: null,
+            previousRetainedAgentId: null,
+          }),
+          snapshot: async () => {
+            snapshots += 1;
+            return snapshot;
+          },
+        }).value,
+      ),
+    ).rejects.toMatchObject({ code: "selection_operation_changed" });
+    expect(snapshots).toBe(0);
   });
 
   test("binds approval to current inventory and refuses compute or job drift", async () => {

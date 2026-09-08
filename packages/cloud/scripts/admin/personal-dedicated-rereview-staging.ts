@@ -4,11 +4,16 @@
  * Dedicated selection owned by the deployed smoke account. An existing receipt
  * is re-reviewed; a missing receipt is bootstrapped only when one candidate has
  * canonical restore authority. The command resolves identifiers internally,
- * binds execution to a prior redacted preview, and proves that agent and job
- * rows did not change.
+ * binds execution to a prior redacted preview, and audits that agent and job
+ * rows did not change. The snapshot is post-commit detection, not rollback
+ * authority; the canonical transaction owns its exact receipt write set.
  */
 
 import { createHash, createHmac } from "node:crypto";
+import {
+  classifyManagedDedicatedProvisionFailure,
+  type ManagedDedicatedProvisionFailureCode,
+} from "./managed-dedicated-provision-diagnostic";
 
 const STAGING_API_BASE_URL = "https://api-staging.eliza.app";
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
@@ -24,6 +29,25 @@ const BOOTSTRAP_REVIEWED_REASON =
 
 type Mode = "preview" | "execute";
 type JsonRecord = Record<string, unknown>;
+
+/** Correlates the account-scoped preview with worker records without publishing an agent ID. */
+export async function canonicalContainerNameSha256(
+  agentId: string,
+): Promise<string> {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      agentId,
+    )
+  ) {
+    throw new PersonalDedicatedRereviewOperatorError(
+      "container_correlation_identity_invalid",
+    );
+  }
+  const { getContainerName } = await import(
+    "@elizaos/cloud-shared/lib/services/docker-sandbox-utils"
+  );
+  return createHash("sha256").update(getContainerName(agentId)).digest("hex");
+}
 
 export class PersonalDedicatedRereviewOperatorError extends Error {
   constructor(readonly code: string) {
@@ -47,7 +71,128 @@ interface MutationSnapshot {
   agentDigest: string;
   jobCount: number;
   jobDigest: string;
+  selectedTarget: RereviewTargetDiagnostic;
 }
+
+interface RereviewTargetDiagnostic {
+  status: string;
+  databaseStatus: string;
+  provisionFailure: ManagedDedicatedProvisionFailureCode;
+  hasContainer: boolean;
+  hasBridge: boolean;
+  sandboxHealthCheckTimedOut: boolean;
+  imageFamily: "canonical" | "demo" | "custom" | "unconfigured";
+  publicImageReferenceDigest: string | null;
+  publicRecordedImageDigest: string | null;
+}
+
+/** Emits lifecycle vocabulary and public image digests, never private image references. */
+export function diagnoseRereviewTarget(target: {
+  status: string;
+  database_status: string;
+  error_message: string | null;
+  sandbox_id: string | null;
+  bridge_url: string | null;
+  docker_image: string | null;
+  image_digest: string | null;
+}): RereviewTargetDiagnostic {
+  if (
+    ![
+      "pending",
+      "provisioning",
+      "running",
+      "stopped",
+      "sleeping",
+      "disconnected",
+      "error",
+      "deletion_pending",
+      "deletion_failed",
+    ].includes(target.status) ||
+    !["none", "provisioning", "ready", "error"].includes(target.database_status)
+  ) {
+    throw new PersonalDedicatedRereviewOperatorError(
+      "selected_target_status_invalid",
+    );
+  }
+  // Only official public repositories may reveal digests. Private repositories,
+  // tags, malformed references and arbitrary database text never cross this boundary.
+  const publicImage = target.docker_image?.match(
+    /^ghcr\.io\/elizaos\/(eliza|eliza-demo)(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@(sha256:[0-9a-f]{64}))?$/,
+  );
+  const imageFamily = publicImage
+    ? publicImage[1] === "eliza"
+      ? "canonical"
+      : "demo"
+    : target.docker_image === null
+      ? "unconfigured"
+      : "custom";
+  return {
+    status: target.status,
+    databaseStatus: target.database_status,
+    imageFamily,
+    publicImageReferenceDigest: publicImage?.[2] ?? null,
+    publicRecordedImageDigest:
+      publicImage &&
+      target.image_digest !== null &&
+      /^sha256:[0-9a-f]{64}$/.test(target.image_digest)
+        ? target.image_digest
+        : null,
+    provisionFailure: classifyManagedDedicatedProvisionFailure(
+      target.error_message,
+      "selected target error",
+    ),
+    hasContainer: Boolean(target.sandbox_id),
+    hasBridge: Boolean(target.bridge_url),
+    sandboxHealthCheckTimedOut:
+      target.error_message !== null &&
+      target.error_message
+        .split(/\r?\n/)
+        .some(
+          (line, index) =>
+            (index === 0 || line.startsWith("caused by:")) &&
+            line.includes("Sandbox health check timed out"),
+        ),
+  };
+}
+
+interface SelectionPreviewBase {
+  inventoryFingerprint: string;
+  stateDisposition: RereviewOperatorEvidence["stateDisposition"];
+  candidateCount: number;
+  replacesTarget: boolean;
+}
+
+type SelectionPreview =
+  | (SelectionPreviewBase & {
+      operation: "bootstrap";
+      receiptFingerprint: null;
+      receiptUpdatedAt: null;
+      previousRetainedAgentId: null;
+    })
+  | (SelectionPreviewBase & {
+      operation: "rereview";
+      receiptFingerprint: string;
+      receiptUpdatedAt: string;
+      previousRetainedAgentId: string;
+    });
+
+type SelectionExecuteInput =
+  | (ResolvedSelection & {
+      operation: "bootstrap";
+      expectedReceiptFingerprint: null;
+      expectedReceiptUpdatedAt: null;
+      expectedPreviousRetainedAgentId: null;
+      expectedInventoryFingerprint: string;
+      expectedStateDisposition: RereviewOperatorEvidence["stateDisposition"];
+    })
+  | (ResolvedSelection & {
+      operation: "rereview";
+      expectedReceiptFingerprint: string;
+      expectedReceiptUpdatedAt: string;
+      expectedPreviousRetainedAgentId: string;
+      expectedInventoryFingerprint: string;
+      expectedStateDisposition: RereviewOperatorEvidence["stateDisposition"];
+    });
 
 export interface RereviewOperatorConfig {
   mode: Mode;
@@ -74,26 +219,63 @@ export interface RereviewOperatorEvidence {
   agentCount: number;
   jobCount: number;
   executed: boolean;
+  selectedTarget: RereviewTargetDiagnostic;
+}
+
+export interface RereviewOperatorDecisionEvidence {
+  schemaVersion: 1;
+  mode: "preview";
+  decisionRequired: true;
+  decisionCode:
+    | "selection_bootstrap_zero_candidates"
+    | "selection_bootstrap_single_candidate"
+    | "selection_bootstrap_inventory_over_limit"
+    | "selection_bootstrap_no_restore_authority"
+    | "selection_bootstrap_multiple_restore_authorities";
+  computeMutation: false;
+  executed: false;
 }
 
 export interface RereviewOperatorDependencies {
   verifyDeployment(expectedCommit: string): Promise<void>;
+  reportAccountLifecycle(apiKey: string): Promise<void>;
   resolveSelection(apiKey: string): Promise<ResolvedSelection>;
-  preview(input: ResolvedSelection): Promise<{
-    receiptFingerprint: string | null;
-    inventoryFingerprint: string;
-    stateDisposition: RereviewOperatorEvidence["stateDisposition"];
-    candidateCount: number;
-    replacesTarget: boolean;
-  }>;
-  execute(
-    input: ResolvedSelection & {
-      expectedReceiptFingerprint: string | null;
-      expectedInventoryFingerprint: string;
-      expectedStateDisposition: RereviewOperatorEvidence["stateDisposition"];
-    },
-  ): Promise<void>;
+  preview(input: ResolvedSelection): Promise<SelectionPreview>;
+  execute(input: SelectionExecuteInput): Promise<void>;
   snapshot(input: ResolvedSelection): Promise<MutationSnapshot>;
+}
+
+const PREVIEW_DECISION_CODES = new Set<
+  RereviewOperatorDecisionEvidence["decisionCode"]
+>([
+  "selection_bootstrap_zero_candidates",
+  "selection_bootstrap_single_candidate",
+  "selection_bootstrap_inventory_over_limit",
+  "selection_bootstrap_no_restore_authority",
+  "selection_bootstrap_multiple_restore_authorities",
+]);
+
+/** Converts an expected read-only preview boundary into neutral evidence. */
+export function previewDecisionEvidence(
+  mode: Mode | undefined,
+  code: string,
+): RereviewOperatorDecisionEvidence | null {
+  if (
+    mode !== "preview" ||
+    !PREVIEW_DECISION_CODES.has(
+      code as RereviewOperatorDecisionEvidence["decisionCode"],
+    )
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: 1,
+    mode: "preview",
+    decisionRequired: true,
+    decisionCode: code as RereviewOperatorDecisionEvidence["decisionCode"],
+    computeMutation: false,
+    executed: false,
+  };
 }
 
 export function resolveReceiptRow<T>(receipts: readonly T[]): T | null {
@@ -109,17 +291,32 @@ export function resolveBootstrapCandidate<T>(
   candidates: readonly T[],
   activationKind: (candidate: T) => "fresh-boot" | string,
 ): T {
-  if (candidates.length < 2 || candidates.length > 100) {
+  if (candidates.length === 0) {
     throw new PersonalDedicatedRereviewOperatorError(
-      "selection_bootstrap_decision_required",
+      "selection_bootstrap_zero_candidates",
+    );
+  }
+  if (candidates.length === 1) {
+    throw new PersonalDedicatedRereviewOperatorError(
+      "selection_bootstrap_single_candidate",
+    );
+  }
+  if (candidates.length > 100) {
+    throw new PersonalDedicatedRereviewOperatorError(
+      "selection_bootstrap_inventory_over_limit",
     );
   }
   const restorable = candidates.filter(
     (candidate) => activationKind(candidate) !== "fresh-boot",
   );
-  if (restorable.length !== 1) {
+  if (restorable.length === 0) {
     throw new PersonalDedicatedRereviewOperatorError(
-      "selection_bootstrap_decision_required",
+      "selection_bootstrap_no_restore_authority",
+    );
+  }
+  if (restorable.length > 1) {
+    throw new PersonalDedicatedRereviewOperatorError(
+      "selection_bootstrap_multiple_restore_authorities",
     );
   }
   return restorable[0];
@@ -202,11 +399,7 @@ function approvalDigest(
       JSON.stringify({
         schemaVersion: 1,
         ...resolved,
-        receiptFingerprint: preview.receiptFingerprint,
-        inventoryFingerprint: preview.inventoryFingerprint,
-        stateDisposition: preview.stateDisposition,
-        candidateCount: preview.candidateCount,
-        replacesTarget: preview.replacesTarget,
+        ...preview,
       }),
     )
     .digest("hex");
@@ -233,8 +426,16 @@ export async function runRereviewOperator(
   dependencies: RereviewOperatorDependencies,
 ): Promise<RereviewOperatorEvidence> {
   await dependencies.verifyDeployment(config.expectedCloudCommit);
+  // A used or absent selection can reject before preview. Diagnose the owner
+  // first so that a stalled activation does not suppress lifecycle evidence.
+  await dependencies.reportAccountLifecycle(config.apiKey);
   const resolved = await dependencies.resolveSelection(config.apiKey);
   const preview = await dependencies.preview(resolved);
+  if (preview.operation !== resolved.operation) {
+    throw new PersonalDedicatedRereviewOperatorError(
+      "selection_operation_changed",
+    );
+  }
   const digest = approvalDigest(config.apiKey, resolved, preview);
   const before = await dependencies.snapshot(resolved);
   const requiredConfirmation =
@@ -267,14 +468,39 @@ export async function runRereviewOperator(
         "reviewed_reason_required",
       );
     }
-    await dependencies.execute({
-      ...resolved,
-      expectedReceiptFingerprint: preview.receiptFingerprint,
-      expectedInventoryFingerprint: preview.inventoryFingerprint,
-      expectedStateDisposition: preview.stateDisposition,
-    });
+    if (resolved.operation === "rereview") {
+      if (preview.operation !== "rereview") {
+        throw new PersonalDedicatedRereviewOperatorError(
+          "selection_operation_changed",
+        );
+      }
+      await dependencies.execute({
+        ...resolved,
+        expectedReceiptFingerprint: preview.receiptFingerprint,
+        expectedReceiptUpdatedAt: preview.receiptUpdatedAt,
+        expectedPreviousRetainedAgentId: preview.previousRetainedAgentId,
+        expectedInventoryFingerprint: preview.inventoryFingerprint,
+        expectedStateDisposition: preview.stateDisposition,
+      });
+    } else {
+      if (preview.operation !== "bootstrap") {
+        throw new PersonalDedicatedRereviewOperatorError(
+          "selection_operation_changed",
+        );
+      }
+      await dependencies.execute({
+        ...resolved,
+        expectedReceiptFingerprint: null,
+        expectedReceiptUpdatedAt: null,
+        expectedPreviousRetainedAgentId: null,
+        expectedInventoryFingerprint: preview.inventoryFingerprint,
+        expectedStateDisposition: preview.stateDisposition,
+      });
+    }
   }
 
+  // Detection happens after the receipt transaction and cannot roll it back.
+  // Write-set prevention belongs to the canonical selection transaction.
   const after = await dependencies.snapshot(resolved);
   assertNoComputeMutation(before, after);
   return {
@@ -293,6 +519,7 @@ export async function runRereviewOperator(
     agentCount: after.agentCount,
     jobCount: after.jobCount,
     executed: config.mode === "execute",
+    selectedTarget: after.selectedTarget,
   };
 }
 
@@ -311,44 +538,17 @@ async function defaultVerifyDeployment(expectedCommit: string): Promise<void> {
   }
 }
 
-async function defaultResolveSelection(
-  apiKey: string,
-): Promise<ResolvedSelection> {
-  const [
-    { and, asc, eq, inArray, isNull, notExists },
-    { dbWrite },
-    { apiKeys },
-    { users },
-    selectionSchema,
-    sandboxSchema,
-    shared,
-    targetService,
-    provenance,
-  ] = await Promise.all([
-    import("drizzle-orm"),
-    import("@elizaos/cloud-shared/db/client"),
-    import("@elizaos/cloud-shared/db/schemas/api-keys"),
-    import("@elizaos/cloud-shared/db/schemas/users"),
-    import(
-      "@elizaos/cloud-shared/db/schemas/personal-dedicated-adoption-selections"
-    ),
-    import("@elizaos/cloud-shared/db/schemas/agent-sandboxes"),
-    import(
-      "@elizaos/cloud-shared/lib/services/shared-runtime/personal-shared-agent"
-    ),
-    import("@elizaos/cloud-shared/lib/services/agent-tier-upgrade-target"),
-    import(
-      "@elizaos/cloud-shared/lib/services/personal-dedicated-adoption-provenance"
-    ),
-  ]);
-  const { personalDedicatedAdoptionSelections } = selectionSchema;
-  const { agentSandboxBackups, agentSandboxes } = sandboxSchema;
-  const { personalSharedAgentId } = shared;
-  const { adoptableUnmarkedTargetWhere } = targetService;
-  const {
-    personalDedicatedActivationAuthority,
-    personalDedicatedBackupProvenanceFromStored,
-  } = provenance;
+async function defaultResolveSmokeOwner(apiKey: string): Promise<{
+  id: string;
+  organizationId: string;
+}> {
+  const [{ and, eq, isNull }, { dbWrite }, { apiKeys }, { users }] =
+    await Promise.all([
+      import("drizzle-orm"),
+      import("@elizaos/cloud-shared/db/client"),
+      import("@elizaos/cloud-shared/db/schemas/api-keys"),
+      import("@elizaos/cloud-shared/db/schemas/users"),
+    ]);
   const keyHash = createHash("sha256").update(apiKey).digest("hex");
   // Identity and receipt resolution are execution authority. A replica can
   // lag key revocation or receipt replacement, so every read uses primary.
@@ -388,6 +588,44 @@ async function defaultResolveSelection(
   ) {
     throw new PersonalDedicatedRereviewOperatorError("smoke_owner_not_active");
   }
+  return { id: owner.id, organizationId: owner.organizationId };
+}
+
+async function defaultResolveSelection(
+  apiKey: string,
+): Promise<ResolvedSelection> {
+  const [
+    { and, asc, eq, inArray, notExists },
+    { dbWrite },
+    selectionSchema,
+    sandboxSchema,
+    shared,
+    targetService,
+    provenance,
+  ] = await Promise.all([
+    import("drizzle-orm"),
+    import("@elizaos/cloud-shared/db/client"),
+    import(
+      "@elizaos/cloud-shared/db/schemas/personal-dedicated-adoption-selections"
+    ),
+    import("@elizaos/cloud-shared/db/schemas/agent-sandboxes"),
+    import(
+      "@elizaos/cloud-shared/lib/services/shared-runtime/personal-shared-agent"
+    ),
+    import("@elizaos/cloud-shared/lib/services/agent-tier-upgrade-target"),
+    import(
+      "@elizaos/cloud-shared/lib/services/personal-dedicated-adoption-provenance"
+    ),
+  ]);
+  const { personalDedicatedAdoptionSelections } = selectionSchema;
+  const { agentSandboxBackups, agentSandboxes } = sandboxSchema;
+  const { personalSharedAgentId } = shared;
+  const { adoptableUnmarkedTargetWhere } = targetService;
+  const {
+    personalDedicatedActivationAuthority,
+    personalDedicatedBackupProvenanceFromStored,
+  } = provenance;
+  const owner = await defaultResolveSmokeOwner(apiKey);
   const sourceAgentId = personalSharedAgentId({
     organizationId: owner.organizationId,
     userId: owner.id,
@@ -432,11 +670,6 @@ async function defaultResolveSelection(
       )
       .orderBy(asc(agentSandboxes.id))
       .limit(101);
-    if (candidates.length < 2 || candidates.length > 100) {
-      throw new PersonalDedicatedRereviewOperatorError(
-        "selection_bootstrap_decision_required",
-      );
-    }
     const storedBackups = await dbWrite
       .select()
       .from(agentSandboxBackups)
@@ -513,16 +746,139 @@ async function defaultSnapshot(
       ),
     )
     .orderBy(jobs.id);
+  const selectedTarget = agentRows.find(
+    (row) => row.id === input.retainedAgentId,
+  );
+  if (!selectedTarget) {
+    throw new PersonalDedicatedRereviewOperatorError("selected_target_missing");
+  }
   return {
     agentCount: agentRows.length,
     agentDigest: digestRows(agentRows),
     jobCount: jobRows.length,
     jobDigest: digestRows(jobRows),
+    selectedTarget: diagnoseRereviewTarget(selectedTarget),
   };
+}
+
+async function defaultReportAccountLifecycle(apiKey: string): Promise<void> {
+  const owner = await defaultResolveSmokeOwner(apiKey);
+  const [
+    { and, eq },
+    { dbWrite },
+    { agentSandboxes },
+    { jobs },
+    { personalDedicatedUpgradeAuthorities: authorities },
+    { personalDedicatedAdoptionSelections: selections },
+  ] = await Promise.all([
+    import("drizzle-orm"),
+    import("@elizaos/cloud-shared/db/client"),
+    import("@elizaos/cloud-shared/db/schemas/agent-sandboxes"),
+    import("@elizaos/cloud-shared/db/schemas/jobs"),
+    import(
+      "@elizaos/cloud-shared/db/schemas/personal-dedicated-upgrade-authorities"
+    ),
+    import(
+      "@elizaos/cloud-shared/db/schemas/personal-dedicated-adoption-selections"
+    ),
+  ]);
+  const [agentRows, jobRows, authorityRows, selectionRows] = await Promise.all([
+    dbWrite
+      .select()
+      .from(agentSandboxes)
+      .where(
+        and(
+          eq(agentSandboxes.organization_id, owner.organizationId),
+          eq(agentSandboxes.user_id, owner.id),
+        ),
+      )
+      .orderBy(agentSandboxes.id),
+    dbWrite
+      .select()
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.organization_id, owner.organizationId),
+          eq(jobs.user_id, owner.id),
+        ),
+      )
+      .orderBy(jobs.created_at),
+    dbWrite
+      .select()
+      .from(authorities)
+      .where(
+        and(
+          eq(authorities.organization_id, owner.organizationId),
+          eq(authorities.user_id, owner.id),
+        ),
+      ),
+    dbWrite
+      .select()
+      .from(selections)
+      .where(
+        and(
+          eq(selections.organization_id, owner.organizationId),
+          eq(selections.user_id, owner.id),
+        ),
+      ),
+  ]);
+  const evidence = {
+    schemaVersion: 1,
+    kind: "account-lifecycle",
+    agents: await Promise.all(
+      agentRows.map(async (agent) => ({
+        ...diagnoseRereviewTarget(agent),
+        canonicalContainerNameSha256: await canonicalContainerNameSha256(
+          agent.id,
+        ),
+        updatedAt: agent.updated_at,
+        selected: selectionRows.some(
+          (row) => row.dedicated_agent_id === agent.id,
+        ),
+        activationBound: authorityRows.some(
+          (row) => row.dedicated_agent_id === agent.id,
+        ),
+        cutoverActivated: authorityRows.some(
+          (row) =>
+            row.dedicated_agent_id === agent.id &&
+            row.cutover_activated_at !== null,
+        ),
+        jobs: jobRows
+          .filter((row) => row.agent_id === agent.id)
+          .map((job) => {
+            if (
+              ![
+                "pending",
+                "in_progress",
+                "completed",
+                "failed",
+                "cancelled",
+              ].includes(job.status)
+            ) {
+              throw new PersonalDedicatedRereviewOperatorError(
+                "diagnostic_job_status_invalid",
+              );
+            }
+            return {
+              status: job.status,
+              failure: classifyManagedDedicatedProvisionFailure(
+                job.error,
+                "lifecycle job error",
+              ),
+              attempts: job.attempts,
+              retryableRequeues: job.retryable_requeues,
+              updatedAt: job.updated_at,
+            };
+          }),
+      })),
+    ),
+  };
+  process.stdout.write(`${JSON.stringify(evidence)}\n`);
 }
 
 const defaultDependencies: RereviewOperatorDependencies = {
   verifyDeployment: defaultVerifyDeployment,
+  reportAccountLifecycle: defaultReportAccountLifecycle,
   resolveSelection: defaultResolveSelection,
   preview: async (input) => {
     const { personalDedicatedAdoptionSelectionService } = await import(
@@ -534,13 +890,21 @@ const defaultDependencies: RereviewOperatorDependencies = {
       reason: "duplicate_owned_dedicated_inventory",
     } as const;
     if (input.operation === "rereview") {
-      return personalDedicatedAdoptionSelectionService.previewRereview(common);
+      return {
+        ...(await personalDedicatedAdoptionSelectionService.previewRereview(
+          common,
+        )),
+        operation: "rereview" as const,
+      };
     }
     const preview =
       await personalDedicatedAdoptionSelectionService.preview(common);
     return {
       ...preview,
+      operation: "bootstrap" as const,
       receiptFingerprint: null,
+      receiptUpdatedAt: null,
+      previousRetainedAgentId: null,
       replacesTarget: false,
     };
   },
@@ -554,14 +918,11 @@ const defaultDependencies: RereviewOperatorDependencies = {
       reason: "duplicate_owned_dedicated_inventory",
     } as const;
     if (input.operation === "rereview") {
-      if (!input.expectedReceiptFingerprint) {
-        throw new PersonalDedicatedRereviewOperatorError(
-          "selection_receipt_fingerprint_missing",
-        );
-      }
       await personalDedicatedAdoptionSelectionService.executeRereview({
         ...common,
         expectedReceiptFingerprint: input.expectedReceiptFingerprint,
+        expectedReceiptUpdatedAt: input.expectedReceiptUpdatedAt,
+        expectedPreviousRetainedAgentId: input.expectedPreviousRetainedAgentId,
       });
       return;
     }
@@ -575,16 +936,13 @@ const defaultDependencies: RereviewOperatorDependencies = {
 };
 
 if (import.meta.main) {
+  let config: RereviewOperatorConfig | undefined;
   try {
-    const evidence = await runRereviewOperator(
-      readRereviewOperatorConfig(),
-      defaultDependencies,
-    );
-    const { logger } = await import("@elizaos/cloud-shared/lib/utils/logger");
-    logger.info(
-      "[personal-dedicated-rereview-staging] Operator result",
-      evidence,
-    );
+    config = readRereviewOperatorConfig();
+    const evidence = await runRereviewOperator(config, defaultDependencies);
+    // This identifier-free receipt is CLI output, required even when verbose
+    // application logging is disabled so an operator can review the next step.
+    process.stdout.write(`${JSON.stringify(evidence)}\n`);
   } catch (error) {
     // error-policy:J1 the command boundary emits only a typed diagnostic code;
     // sensitive resolved identifiers and credentials never reach logs.
@@ -593,9 +951,15 @@ if (import.meta.main) {
         ? error.code
         : "personal_dedicated_rereview_failed";
     const { logger } = await import("@elizaos/cloud-shared/lib/utils/logger");
-    logger.error("[personal-dedicated-rereview-staging] Operator failed", {
-      code,
-    });
-    process.exitCode = 1;
+    const decision = previewDecisionEvidence(config?.mode, code);
+    if (decision) {
+      process.stdout.write(`${JSON.stringify(decision)}\n`);
+      process.exitCode = 0;
+    } else {
+      logger.error("[personal-dedicated-rereview-staging] Operator failed", {
+        code,
+      });
+      process.exitCode = 1;
+    }
   }
 }

@@ -9,6 +9,7 @@ process.env.MOCK_REDIS = "1";
 
 import { beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { ChannelType, MESSAGE_SOURCE_CLIENT_CHAT } from "@elizaos/core/edge";
+import type { SharedReminderActionProvenance } from "./run-shared-agent-turn";
 
 let turn: Record<string, unknown>;
 let streamTurn: Record<string, unknown>;
@@ -163,6 +164,7 @@ const admitOrganizationInference = mock(
     context?: { metadata?: Record<string, unknown> };
     estimatedInputTokens?: number;
     executionCtx?: { waitUntil(promise: Promise<unknown>): void };
+    atomicProviderBoundary?: boolean;
   }) => {
     if (admissionError) throw admissionError;
     params.executionCtx?.waitUntil(Promise.resolve());
@@ -182,6 +184,7 @@ const admitOrganizationInference = mock(
 );
 mock.module("../organization-inference-admission", () => ({
   admitOrganizationInference,
+  InferenceAdmissionUnavailableError: class InferenceAdmissionUnavailableError extends Error {},
 }));
 mock.module("../ai-billing", () => ({
   estimateInputTokens,
@@ -400,6 +403,7 @@ mock.module("../../cache/client", () => ({
 
 const { InsufficientCreditsError } = await import("../ai-billing");
 const { InferenceAdmissionDispatchMarkError } = await import("../inference-admission-gate");
+const { InferenceAdmissionUnavailableError } = await import("../organization-inference-admission");
 const { personalSharedAgentId } = await import("./personal-shared-agent");
 const { SharedRuntimeChatService, sharedRuntimeChannelId } = await import("./shared-runtime-chat");
 
@@ -433,6 +437,7 @@ type TestMessage = {
   content: string;
   createdAt?: number;
   interrupted?: boolean;
+  reminderAction?: SharedReminderActionProvenance;
   grounding?:
     | {
         kind: "web_search";
@@ -623,6 +628,7 @@ describe("SharedRuntimeChatService", () => {
       config: { windowMs: 60_000, maxRequests: 120 },
     });
     const admissionContext = admitOrganizationInference.mock.calls[0]?.[0].context;
+    expect(admitOrganizationInference.mock.calls[0]?.[0].atomicProviderBoundary).toBe(true);
     expect(admissionContext?.metadata).toMatchObject({
       agentId: agent.id,
       channelId: expect.any(String),
@@ -1234,6 +1240,25 @@ describe("SharedRuntimeChatService", () => {
     expect(settleUnknownCalls).toBe(0);
 
     settleCalls.length = 0;
+    turnError = new Error("late balance denial", {
+      cause: new InsufficientCreditsError(0.25, 0),
+    });
+    const denied = await service.bridge(agent, rpc, harness());
+    expect(denied.error?.code).toBe(-32002);
+    expect(settleCalls).toEqual([0]);
+    expect(settleUnknownCalls).toBe(0);
+
+    settleCalls.length = 0;
+    turnError = new Error("late admission outage", {
+      cause: new InferenceAdmissionUnavailableError(),
+    });
+    await expect(service.bridge(agent, rpc, harness())).rejects.toMatchObject({
+      name: "SharedRuntimeCacheWarmingError",
+    });
+    expect(settleCalls).toEqual([0]);
+    expect(settleUnknownCalls).toBe(0);
+
+    settleCalls.length = 0;
     turnError = wrappedProviderError(422);
     await expect(service.bridge(agent, rpc, harness())).rejects.toThrow("shared turn failed");
     expect(settleCalls).toEqual([0]);
@@ -1340,6 +1365,45 @@ describe("SharedRuntimeChatService", () => {
     expect(memoryScopes[0]?.roomKey).not.toBe(agent.id);
     await Promise.all(h.background);
     expect(settleCalls).toEqual([0.004]);
+  });
+
+  test("persists validated reminder action provenance from a buffered terminal stream", async () => {
+    const reminderAction = {
+      actionName: "REMINDERS" as const,
+      operation: "create" as const,
+      success: true,
+      taskIds: ["created-reminder-1"],
+      deliveryScope: '{"chatId":"room-1","platform":"telegram"}',
+    };
+    streamTurn = {
+      degraded: false,
+      get history() {
+        const assistantId = (lastStreamTurnInput?.messageIds as { assistant?: string } | undefined)
+          ?.assistant;
+        return [
+          {
+            id: assistantId,
+            role: "assistant",
+            content: "hello back",
+            reminderAction,
+          },
+        ];
+      },
+      parts: (async function* () {
+        yield { type: "text-delta", text: "hello " };
+        yield { type: "finish", text: "hello back" };
+      })(),
+    };
+    const h = harness();
+
+    await (await new SharedRuntimeChatService().stream(agent, rpc, h)).text();
+
+    expect(h.history().at(-1)).toMatchObject({
+      role: "assistant",
+      content: "hello back",
+      interrupted: false,
+      reminderAction,
+    });
   });
 
   test("terminal done frame is not held open by a stalled long-term-memory mirror (#25689)", async () => {

@@ -491,6 +491,33 @@ function agentProvisionJobResultToRecord(result: AgentProvisionJobResult): Recor
   return { ...result };
 }
 
+const REPLACEMENT_CLEANUP_ONLY_PREFIX = "Replacement cleanup is still pending: ";
+const REPLACEMENT_CLEANUP_CAUSE_SEPARATOR = "; replacement cleanup remains pending: ";
+
+/** Keep the first startup failure when later free retries only re-attempt cleanup. */
+function preserveProvisionFailureAcrossCleanupRetry(
+  priorResult: unknown,
+  currentError: string,
+): string {
+  if (!currentError.startsWith(REPLACEMENT_CLEANUP_ONLY_PREFIX)) return currentError;
+  if (!priorResult || typeof priorResult !== "object" || Array.isArray(priorResult)) {
+    return currentError;
+  }
+  const priorError = (priorResult as { error?: unknown }).error;
+  if (
+    typeof priorError !== "string" ||
+    priorError.length === 0 ||
+    priorError.startsWith(REPLACEMENT_CLEANUP_ONLY_PREFIX)
+  ) {
+    return currentError;
+  }
+  const separatorIndex = priorError.indexOf(REPLACEMENT_CLEANUP_CAUSE_SEPARATOR);
+  const primaryError = separatorIndex >= 0 ? priorError.slice(0, separatorIndex) : priorError;
+  return `${primaryError}${REPLACEMENT_CLEANUP_CAUSE_SEPARATOR}${currentError.slice(
+    REPLACEMENT_CLEANUP_ONLY_PREFIX.length,
+  )}`;
+}
+
 function agentDeleteJobDataToRecord(data: AgentDeleteJobData): Record<string, unknown> {
   return { ...data };
 }
@@ -1207,6 +1234,13 @@ interface LifecycleJobOptions<TData extends object> {
   resolveReplay?: (tx: DbTransaction, sandbox: LifecycleSandboxRow) => Promise<Job | undefined>;
   deleteAuthorization?: DeleteAuthorization;
   /**
+   * Permit an exact conditional delete to own a row whose failed replacement
+   * still has a durable cleanup locator. The daemon converges that locator
+   * before deleting the serving generation; ordinary lifecycle jobs remain
+   * blocked by the unresolved fence.
+   */
+  allowReplacementCleanup?: boolean;
+  /**
    * Called with the hydrated existing job when an active pending/in_progress
    * job of the same type would be reused instead of inserting a new row.
    * Throw to refuse the enqueue — reuse silently DROPS the caller's job data,
@@ -1448,12 +1482,19 @@ export class UpgradeFailedError extends Error {
 class RetryableProvisionTransportError extends Error {
   readonly retrySnapshot: Job;
   readonly maxRequeues: number;
+  readonly durableErrorText?: string;
 
-  constructor(message: string, retrySnapshot: Job, maxRequeues: number) {
-    super(message);
+  constructor(
+    message: string,
+    retrySnapshot: Job,
+    maxRequeues: number,
+    options?: { cause?: unknown; durableErrorText?: string },
+  ) {
+    super(message, options);
     this.name = "RetryableProvisionTransportError";
     this.retrySnapshot = retrySnapshot;
     this.maxRequeues = maxRequeues;
+    this.durableErrorText = options?.durableErrorText;
   }
 }
 
@@ -1822,7 +1863,8 @@ export class ProvisioningJobService {
 
     if (
       EXCLUSIVE_AGENT_LIFECYCLE_JOB_TYPES.includes(opts.jobType) &&
-      sandbox.replacement_cleanup_sandbox_id
+      sandbox.replacement_cleanup_sandbox_id &&
+      !opts.allowReplacementCleanup
     ) {
       throw new ApiError(
         409,
@@ -2124,6 +2166,7 @@ export class ProvisioningJobService {
       userId: params.userId,
       webhookUrl: params.webhookUrl,
       deleteAuthorization: params.authorization,
+      allowReplacementCleanup: expectedIdentity !== undefined,
       maxAttempts: 3,
       // SSH stop is fast (~10s graceful + ~5s force kill), DB cascade is
       // sub-second. 30s matches the Docker deletion-stop command timeout.
@@ -2288,7 +2331,6 @@ export class ProvisioningJobService {
                 AND ${agentSandboxes.created_at} < ${new Date(expectedCreatedAt.getTime() + 1)}`,
                 eq(agentSandboxes.execution_tier, expectedIdentity.executionTier),
                 isNull(agentSandboxes.deleted_at),
-                isNull(agentSandboxes.replacement_cleanup_sandbox_id),
                 sql`COALESCE(${agentSandboxes.warm_claim_credential_state}, '')
                 NOT IN ('pending', 'attested')`,
               ]
@@ -3702,21 +3744,16 @@ export class ProvisioningJobService {
   }
 
   /**
-   * Best-effort kick of the provisioning worker without waiting for the
-   * next cron tick. Fire-and-forget — the cron is the safety net.
-   *
-   * The cron endpoint is idempotent (FOR UPDATE SKIP LOCKED) so calling
-   * it concurrently with the scheduled invocation is safe.
+   * Best-effort kick of the provisioning worker without waiting for its next
+   * daemon poll. Callers running inside a Worker must register this promise
+   * with `waitUntil`; the durable job and daemon poll remain authoritative.
    */
   async triggerImmediate(env?: {
-    CRON_SECRET?: string;
     CONTAINER_CONTROL_PLANE_TOKEN?: string;
     CONTAINER_CONTROL_PLANE_URL?: string;
     CONTAINER_SIDECAR_URL?: string;
     DATABASE_URL?: string;
     HETZNER_CONTAINER_CONTROL_PLANE_URL?: string;
-    NEXT_PUBLIC_API_URL?: string;
-    NEXT_PUBLIC_APP_URL?: string;
   }): Promise<void> {
     const controlPlaneBaseUrl =
       env?.CONTAINER_CONTROL_PLANE_URL ??
@@ -3734,7 +3771,7 @@ export class ProvisioningJobService {
         const target = new URL(controlPlaneBaseUrl);
         target.pathname = "/api/v1/cron/process-provisioning-jobs";
         target.search = "?limit=5";
-        await fetch(target, {
+        const response = await fetch(target, {
           method: "POST",
           headers: {
             "x-container-control-plane-token": controlPlaneToken,
@@ -3743,34 +3780,22 @@ export class ProvisioningJobService {
           },
           signal: AbortSignal.timeout(120_000),
         });
+        if (!response.ok) {
+          throw new ElizaError("The provisioning control plane rejected the immediate nudge", {
+            code: "PROVISIONING_IMMEDIATE_TRIGGER_REJECTED",
+            context: {
+              target: "control-plane",
+              status: response.status,
+            },
+          });
+        }
         return;
       } catch (err) {
         logger.debug("[provisioning-jobs] direct triggerImmediate failed", {
           error: jobErrorText(err),
         });
+        throw err;
       }
-    }
-
-    const cronSecret = env?.CRON_SECRET ?? process.env.CRON_SECRET;
-    const baseUrl =
-      env?.NEXT_PUBLIC_API_URL ??
-      env?.NEXT_PUBLIC_APP_URL ??
-      process.env.NEXT_PUBLIC_API_URL ??
-      process.env.NEXT_PUBLIC_APP_URL;
-    if (!cronSecret || !baseUrl) return;
-    try {
-      await fetch(`${baseUrl}/api/v1/cron/process-provisioning-jobs?limit=5`, {
-        method: "POST",
-        headers: {
-          "x-cron-secret": cronSecret,
-          "user-agent": "agent-provision-trigger/1.0",
-        },
-        signal: AbortSignal.timeout(3_000),
-      });
-    } catch (err) {
-      logger.debug("[provisioning-jobs] triggerImmediate fire-and-forget failed", {
-        error: jobErrorText(err),
-      });
     }
   }
 
@@ -4264,7 +4289,10 @@ export class ProvisioningJobService {
     // that has to carry a stack — the 16 conversions below it are log lines.
     const errorMsg = appCacheError
       ? finalizeJobErrorText(formatAppCacheInvalidationError(appCacheError))
-      : jobErrorText(err);
+      : retryableTransportError instanceof RetryableProvisionTransportError &&
+          retryableTransportError.durableErrorText !== undefined
+        ? retryableTransportError.durableErrorText
+        : jobErrorText(err);
     result?.errors.push({ jobId: job.id, error: errorMsg });
 
     if (safeErrorKind(err, RejectedAgentExecutionError)) {
@@ -6491,21 +6519,43 @@ export class ProvisioningJobService {
     if (await this.completeIfAgentGone(job, provResult, data.agentId)) return;
 
     if (!provResult.success) {
+      const provisionError = preserveProvisionFailureAcrossCleanupRetry(
+        job.result,
+        provResult.error,
+      );
       const retrySnapshot = await this.updateClaimedExecution(job, {
         result: agentProvisionJobResultToRecord({
           cloudAgentId: data.agentId,
           status: provResult.sandboxRecord?.status ?? "error",
-          error: provResult.error,
+          error: provisionError,
         }),
       });
       if (provResult.retryable) {
+        const cleanupOnlyRetry = provResult.error.startsWith(REPLACEMENT_CLEANUP_ONLY_PREFIX);
+        const failureCause = cleanupOnlyRetry && job.error ? undefined : provResult.failureCause;
         throw new RetryableProvisionTransportError(
-          provResult.error,
+          provisionError,
           retrySnapshot,
           PROVISION_TRANSPORT_MAX_FREE_RETRIES,
+          failureCause === undefined && !(cleanupOnlyRetry && job.error)
+            ? undefined
+            : {
+                cause: failureCause,
+                // The original startup failure is already a complete,
+                // redacted durable diagnostic. Re-wrapping that serialized
+                // text as a new Error cause copies every prior stack on each
+                // cleanup retry and grows jobs.error geometrically. Preserve
+                // it byte-for-byte; the refreshed cleanup fact is retained in
+                // result.error above.
+                durableErrorText: cleanupOnlyRetry ? (job.error ?? undefined) : undefined,
+              },
         );
       }
-      throw new Error(provResult.error);
+      throw new ElizaError(provisionError, {
+        code: "AGENT_PROVISION_FAILED",
+        context: { jobId: job.id, agentId: data.agentId },
+        cause: provResult.failureCause,
+      });
     }
 
     const jobResult: AgentProvisionJobResult = {

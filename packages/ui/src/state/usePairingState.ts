@@ -13,6 +13,45 @@ import { persistActiveServerCredential } from "./active-server-credential";
 const PAIRING_PERSISTENCE_ERROR =
   "Pairing succeeded, but this device could not save the connection. Keep this window open and submit again to retry saving.";
 
+export type PairingFailureCode =
+  | "PAIRING_INVALID"
+  | "PAIRING_EXPIRED"
+  | "PAIRING_DISABLED"
+  | "PAIRING_NOT_READY"
+  | "PAIRING_INSTANCE_MISMATCH"
+  | "PAIRING_RATE_LIMITED"
+  | "PAIRING_SESSION_FAILED";
+
+/** Converts the server's stable pairing verdict into an actionable UI state. */
+export function pairingFailureMessage(error: unknown): string {
+  const code = (error as { code?: string }).code as
+    | PairingFailureCode
+    | undefined;
+  switch (code) {
+    case "PAIRING_INVALID":
+      return "The pairing code is invalid. Check the code and try again.";
+    case "PAIRING_EXPIRED":
+      return "Pairing code expired. Generate a new code and try again.";
+    case "PAIRING_DISABLED":
+      return "Pairing is disabled on this server. Ask the server owner to enable it.";
+    case "PAIRING_NOT_READY":
+      return "The server is still starting. Wait a moment and try the same code again.";
+    case "PAIRING_INSTANCE_MISMATCH":
+      return "The server instance changed. Refresh the code from the server and try again.";
+    case "PAIRING_RATE_LIMITED":
+      return "Too many attempts. Try again later.";
+    case "PAIRING_SESSION_FAILED":
+      return "The code was accepted, but the server could not create a session. Generate a new code and try again.";
+    default: {
+      const status = (error as { status?: number }).status;
+      if (status === 410)
+        return "Pairing code expired. Generate a new code and try again.";
+      if (status === 429) return "Too many attempts. Try again later.";
+      return "Pairing failed. Check the code and try again.";
+    }
+  }
+}
+
 export function usePairingState() {
   const [pairingEnabled, setPairingEnabled] = useState(false);
   const [pairingExpiresAt, setPairingExpiresAt] = useState<number | null>(null);
@@ -46,16 +85,9 @@ export function usePairingState() {
           credential = { token, apiBase: client.getBaseUrl() };
           pendingCredentialRef.current = credential;
         } catch (err) {
-          // error-policy:J4 pairing HTTP statuses become distinct recovery
-          // guidance while the one-use code has not succeeded.
-          const status = (err as { status?: number }).status;
-          if (status === 410)
-            setPairingError(
-              "Pairing code expired. Generate a new code and try again.",
-            );
-          else if (status === 429)
-            setPairingError("Too many attempts. Try again later.");
-          else setPairingError("Pairing failed. Check the code and try again.");
+          // error-policy:J4 the server's stable pairing verdict becomes distinct
+          // recovery guidance while the one-use code has not succeeded.
+          setPairingError(pairingFailureMessage(err));
           return;
         }
       }

@@ -1,3 +1,7 @@
+/**
+ * Exercises latency probes through real SSE parsing and controlled HTTP responses,
+ * including complete-output nonce verification and privacy-safe result records.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -5,6 +9,7 @@ import {
   buildDedicatedStreamRequest,
   buildOpenAiRequestBody,
   buildProofPrompt,
+  consumeAgentEvent,
   consumeOpenAiEvent,
   parseProbeCase,
   parseServerTiming,
@@ -251,8 +256,31 @@ test("buildDedicatedStreamRequest matches the frontend delta stream contract", (
   });
 });
 
+test("browser-literal dedicated request omits probe-only instrumentation", () => {
+  const request = buildDedicatedStreamRequest({
+    apiKey: "secret",
+    prompt: "private prompt",
+    clientMessageId: "message-1",
+    turnCorrelation: "11111111-1111-4111-8111-111111111111",
+    traceId: "0123456789abcdef0123456789abcdef",
+    requestMode: "browser-literal",
+  });
+
+  assert.deepEqual(request.headers, {
+    Authorization: "Bearer secret",
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+    "X-Eliza-Trace-Id": "0123456789abcdef0123456789abcdef",
+  });
+  assert.equal("X-Eliza-Telemetry" in request.headers, false);
+  assert.equal("X-ElizaOS-Turn-Correlation" in request.headers, false);
+  assert.equal("X-ElizaOS-Turn-Attempt" in request.headers, false);
+  assert.equal("User-Agent" in request.headers, false);
+});
+
 test("probeOpenAi requires a clean terminal frame and never records prompt text", async () => {
   let requestBody = null;
+  let requestTraceId = null;
   const result = await probeOpenAi({
     target: "gateway",
     probeCase: parseProbeCase("zai-glm-4.7@none@512"),
@@ -265,10 +293,11 @@ test("probeOpenAi requires a clean terminal frame and never records prompt text"
     metadata: { phase: "warm", pairId: "pair-1" },
     fetchImpl: async (_url, init) => {
       requestBody = JSON.parse(init.body);
+      requestTraceId = init.headers["X-Eliza-Trace-Id"];
       return successfulOpenAiResponse("proof-clean", {
         headers: {
           "x-eliza-preforward-ms": "total=12;auth=2;mid=3;reserve=4;setup=3",
-          "x-eliza-trace-id": "trace-safe",
+          "x-eliza-trace-id": requestTraceId,
           "x-private": "must-not-escape",
         },
       });
@@ -288,10 +317,64 @@ test("probeOpenAi requires a clean terminal frame and never records prompt text"
   });
   assert.match(requestBody.messages[0].content, /Custom private instruction/);
   assert.match(requestBody.messages[0].content, /proof-clean/);
+  assert.match(requestTraceId, /^[0-9a-f]{32}$/);
+  assert.equal(result.traceId, requestTraceId);
   const serialized = JSON.stringify(result);
   assert.doesNotMatch(serialized, /super-secret/);
   assert.doesNotMatch(serialized, /Custom private instruction/);
   assert.doesNotMatch(serialized, /must-not-escape/);
+});
+
+test("browser-literal dedicated probe reports wire timings and adopts the echoed trace", async () => {
+  const calls = [];
+  const result = await probeDedicated({
+    agentId: "agent-literal",
+    baseUrl: "https://agent.example",
+    apiKey: "secret",
+    proof: "proof-literal",
+    timeoutMs: 5_000,
+    sequence: 1,
+    keepConversation: true,
+    requestMode: "browser-literal",
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url, headers: init.headers });
+      if (calls.length === 1) {
+        return Response.json({ conversation: { id: "conversation-literal" } });
+      }
+      return new Response(
+        [
+          'data: {"type":"token","text":"proof-literal"}\n\n',
+          'data: {"type":"done"}\n\n',
+        ].join(""),
+        {
+          headers: {
+            "x-eliza-trace-id": "abcdef0123456789abcdef0123456789",
+          },
+        },
+      );
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.requestMode, "browser-literal");
+  assert.equal(result.traceId, "abcdef0123456789abcdef0123456789");
+  assert.equal(Number.isFinite(result.responseHeadersMs), true);
+  assert.equal(Number.isFinite(result.firstEventMs), true);
+  assert.equal(Number.isFinite(result.firstTokenMs), true);
+  assert.equal(Number.isFinite(result.totalMs), true);
+  assert.deepEqual(result.phaseTimings, {
+    pagesBootMs: null,
+    browserRenderMs: null,
+    browserDispatchToHeadersMs: result.responseHeadersMs,
+    browserDispatchToFirstEventMs: result.firstEventMs,
+    browserDispatchToFirstTokenMs: result.firstTokenMs,
+    browserDispatchToDoneMs: result.totalMs,
+  });
+  assert.equal("X-Eliza-Trace-Id" in calls[0].headers, false);
+  assert.match(calls[1].headers["X-Eliza-Trace-Id"], /^[0-9a-f]{32}$/);
+  assert.equal("X-Eliza-Telemetry" in calls[1].headers, false);
+  assert.equal("X-ElizaOS-Turn-Correlation" in calls[1].headers, false);
+  assert.equal("X-ElizaOS-Turn-Attempt" in calls[1].headers, false);
 });
 
 test("probeOpenAi rejects truncated, malformed, and provider-error streams", async () => {
@@ -372,6 +455,7 @@ test("probeOpenAi reduces HTTP and network errors to safe metadata", async () =>
     type: "invalid_request_error",
     code: "bad_model",
   });
+  assert.equal(http.status, 400);
   assert.doesNotMatch(JSON.stringify(http), /private upstream detail/);
 
   const network = await probeOpenAi({
@@ -452,6 +536,7 @@ test("probeDedicated requires a done terminal and sanitizes telemetry", async ()
     keepConversation: false,
     fetchImpl,
   });
+  assert.equal(result.requestMode, "instrumented");
   assert.equal(result.ok, true);
   assert.equal(result.terminalType, "done");
   assert.deepEqual(result.terminalTelemetry, {
@@ -663,4 +748,117 @@ test("paired CLI reports proof misses without a numeric acceptance gate", async 
     delete testEnv.TEST_DIRECT_CHAT_KEY;
     delete testEnv.TEST_GATEWAY_CHAT_KEY;
   }
+});
+
+test("agent snapshots replace prior output without repeating terminal text", async () => {
+  for (const events of [
+    [
+      { type: "token", fullText: "proof" },
+      { type: "done", fullText: "proof" },
+    ],
+    [{ type: "done", fullText: "proof" }],
+    [
+      { type: "token", delta: "obsolete" },
+      { type: "token", fullText: "pr", delta: "must not be appended" },
+      { type: "token", delta: "oof" },
+      { type: "done", fullText: "proof" },
+    ],
+  ]) {
+    const response = openAiSse(events, { done: false });
+    const result = await readSse(response.body, 0, consumeAgentEvent, () => 10);
+    assert.equal(result.outputText, "proof");
+    assert.equal(result.outputCharacters, 5);
+    assert.equal(result.firstTokenMs, 10);
+    assert.equal(result.terminal.type, "done");
+    assert.equal(result.malformedEvents, 0);
+  }
+});
+
+test("empty snapshots do not start visible timing and can clear prior output", async () => {
+  const response = openAiSse(
+    [
+      { type: "token", fullText: "" },
+      { type: "token", fullText: "visible" },
+      { type: "done", fullText: "" },
+    ],
+    { done: false },
+  );
+  let time = 0;
+  const result = await readSse(
+    response.body,
+    0,
+    consumeAgentEvent,
+    () => ++time,
+  );
+  assert.equal(result.firstEventMs, 1);
+  assert.equal(result.firstTokenMs, 2);
+  assert.equal(result.outputText, "");
+  assert.equal(result.outputCharacters, 0);
+});
+
+test("dedicated snapshot reply verifies proof without exposing generated text", async () => {
+  let requests = 0;
+  const result = await probeDedicated({
+    agentId: "snapshot-agent",
+    baseUrl: "https://agent.example",
+    apiKey: "private-key",
+    proof: "snapshot-proof",
+    timeoutMs: 5_000,
+    sequence: 1,
+    keepConversation: true,
+    fetchImpl: async () => {
+      if (++requests === 1)
+        return Response.json({ conversation: { id: "snapshot-conversation" } });
+      return openAiSse(
+        [
+          { type: "status", kind: "thinking" },
+          { type: "token", fullText: "snapshot-proof" },
+          { type: "done", fullText: "snapshot-proof" },
+        ],
+        { done: false },
+      );
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.proofMatched, true);
+  assert.equal(result.outputCharacters, "snapshot-proof".length);
+  assert.equal(typeof result.firstTokenMs, "number");
+  assert.doesNotMatch(JSON.stringify(result), /private-key|snapshot-proof/);
+});
+
+test("an error terminal preserves snapshot evidence but cannot pass the probe", async () => {
+  let requests = 0;
+  const result = await probeDedicated({
+    agentId: "snapshot-agent",
+    baseUrl: "https://agent.example",
+    apiKey: "private-key",
+    proof: "partial-proof",
+    timeoutMs: 5_000,
+    sequence: 1,
+    keepConversation: true,
+    fetchImpl: async () => {
+      if (++requests === 1)
+        return Response.json({ conversation: { id: "failed-conversation" } });
+      return openAiSse(
+        [
+          { type: "token", fullText: "partial-proof" },
+          {
+            type: "error",
+            fullText: "partial-proof",
+            error: "private failure details",
+          },
+        ],
+        { done: false },
+      );
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.cleanCompletion, false);
+  assert.equal(result.proofMatched, true);
+  assert.equal(result.outputCharacters, "partial-proof".length);
+  assert.equal(result.terminalType, "error");
+  assert.doesNotMatch(
+    JSON.stringify(result),
+    /private-key|partial-proof|private failure details/,
+  );
 });

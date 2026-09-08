@@ -38,6 +38,55 @@ isolated port (41873 by default):
 bun run --cwd plugins/plugin-personal-assistant test:connections:e2e
 ```
 
+## Undated todo lifecycle
+
+Undated owner todos remain task definitions with `cadence.kind = "unscheduled"`.
+They never acquire a synthetic occurrence, due date, or reminder. The Todo read
+service combines these definitions with the existing scheduled occurrences;
+`GET /api/lifeops/todos` identifies each target with `targetKind: "definition" |
+"occurrence"`, its stored ID, and a nullable due date.
+
+`OWNER_TODOS` supports `complete` and `reopen` for undated definitions. HTTP
+clients use `POST /api/lifeops/definitions/:id/complete` and `/reopen` under the
+existing owner authorization boundary. Completion changes `active` to
+`completed`; reopening restores `active`. The scoped definition update and its
+audit commit atomically. Repeating the desired state preserves the record
+revision and returns a no-op without another audit. Paused, archived, scheduled,
+and non-task definitions cannot use this transition; scheduled tasks retain
+occurrence completion. Completed undated todos stay visible in the read DTO.
+
+A supplied deletion target constrains that operation even when the complete
+message names other records for later steps. Exact IDs and titles retain their
+identity through owner and keep/leave exclusions; missing or excluded targets
+cannot be replaced by another named record. An empty optional target does not
+hide an explicit title. Existing unambiguous title aliases remain supported;
+enumerated deletion applies only when no single target was supplied.
+
+## Definition creation retries
+
+Owner definition creation accepts an optional `idempotencyKey` (1–256 non-NUL
+characters). Keep the same key and complete request for retries of one authorized
+operation; use distinct keys for deliberately separate identical items. Tool-call
+IDs are transport identities and must not replace this operation identity.
+Unkeyed owner actions retain their existing content-based confirmation behavior.
+The canonical model-tool boundary treats an empty or whitespace-only optional
+key as omission, using the shared `modelOmissionSentinels` contract. This lets
+strict providers represent an unused field on reads and mutations that do not
+create definitions. Direct domain calls still reject an explicitly empty key;
+nonempty tool keys retain the normal length and content validation.
+When an owner call has no explicit `intent` argument, its full initial message
+remains stored as provenance; different retry wording does not change the
+operation identity. Explicit intent and all other semantic arguments still
+participate in conflicting-key checks.
+
+The key is scoped to the runtime agent, acting owner, target ownership, and create
+operation. The existing audit table atomically claims it with the definition
+insert and records completion after creation effects succeed. Completed replays
+return the existing scoped record and a replay receipt. Conflicting request reuse,
+deleted or inaccessible records, and interrupted effects return typed errors;
+an uncertain operation never silently dispatches another creation. Audit identity
+survives runtime restart and definition deletion. Legacy audit rows remain unkeyed.
+
 ## Scheduled items, not generic tasks
 
 Every reminder, check-in, follow-up, watcher, recap, approval surface, and
@@ -170,6 +219,39 @@ src/lifeops/
                                   subscriptions, assistant workflows, etc.)
 ```
 
+## Parenting-agreement knowledge
+
+Parenting agreements upload through resumable, independently hashed 4 MiB
+requests with their staging bytes in the runtime's canonical private
+`IFileStorageService`; the complete document has no semantic size ceiling.
+Commit requires every ordered chunk and verifies the reassembled byte length
+and optional whole-file SHA-256 before immutable storage. The server—not the
+form—parses the page count. `PdfService.extractCompleteDocument` then accounts
+for every page with native text plus rendered-page vision transcription for
+images or text-empty pages. One failed page fails ingestion; partial content is
+never published as a complete owner-private `DocumentService` record. LifeOps
+persists the media SHA-256, handle, document id, byte size, MIME type, filename,
+parser-derived page count, complete extracted text, and version chain; it does
+not create another permanent file store.
+
+Owner- or agent-extracted obligations begin as `proposed` and must carry an
+in-range page citation plus the cited source text. Only the owner can make the terminal
+`approved` or `rejected` decision. Agent and chat pins are independent
+discovery records and never confer access.
+
+The owner is the only implicit reader. A guest read requires a resource grant
+bound to one exact household grant with `knowledge.read`; the guest entity must
+have a verified identity, and both grants must remain unrevoked and unexpired.
+Guest views expose approved obligations only. Revoking the relationship-backed
+household grant immediately invalidates every agreement binding that relies on
+it.
+
+The owner surface is available through `OWNER_AGREEMENT_KNOWLEDGE` and the
+authenticated `/api/lifeops/agreements/*` routes. Grant previews enumerate the
+exact read effects and exclusions before issuance. Active agent/chat pins feed
+only approved, page-cited obligations into owner planner context; uploading a
+PDF remains on the document/API surface so chat actions never invent bytes.
+
 ## Default packs
 
 Default packs are bundles of typed scheduled-item definitions compiled into
@@ -242,7 +324,9 @@ per-agent. The `entityId === "self"` row is bootstrapped on first use.
   `observeIdentity`; the merge engine in `entities/merge.ts` collapses
   entities with high-confidence identity matches. Manual merges go through
   `POST /api/lifeops/entities/merge` and are audited.
-- **REST surface** — routes live in `src/routes/`.
+- **REST surface** — the main plugin registers the authenticated handlers in
+  `src/routes/`. The standalone `personalAssistantRoutesPlugin` export remains
+  available to hosts that compose only the HTTP surface.
 
 ## Pause and handoff
 

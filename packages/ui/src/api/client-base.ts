@@ -5,6 +5,7 @@
  * without circular dependency issues.
  */
 
+import { isInferenceTraceId } from "@elizaos/core";
 import { logger } from "@elizaos/logger";
 import {
   extractAssistantReplyText,
@@ -100,6 +101,7 @@ const DEDICATED_CLOUD_CORS_BLOCKED_HEADERS = new Set([
   // are not in the dedicated container server's CORS contract.
   "x-elizaos-turn-correlation",
   "x-elizaos-turn-attempt",
+  "x-eliza-telemetry",
 ]);
 const REPLAYABLE_WS_EVENT_TYPES: ReadonlySet<string> = new Set([
   SHELL_NAVIGATE_VIEW_WS_EVENT,
@@ -125,6 +127,7 @@ type StreamChatEvent = {
   userMessageId?: string;
   assistantEphemeral?: boolean;
   historyRefreshRequired?: boolean;
+  interrupted?: boolean;
   message?: string;
   thought?: string;
   noResponseReason?: string;
@@ -256,6 +259,7 @@ type StreamChatState = {
   doneUserMessageId: string | null;
   doneAssistantEphemeral: boolean;
   doneHistoryRefreshRequired: boolean;
+  doneInterrupted: boolean;
   doneThought: string | null;
   doneNoResponseReason: "ignored" | null;
   doneUsage: ChatTokenUsage | undefined;
@@ -264,6 +268,7 @@ type StreamChatState = {
   doneAccountConnect: AccountConnectRequest | undefined;
   doneLocalInference: LocalInferenceChatMetadata | undefined;
   doneActionResults: ChatActionResultSummary[] | undefined;
+  replyReadyActionsDelivered: boolean;
   receivedDone: boolean;
 };
 
@@ -408,6 +413,33 @@ function applyStreamChatTokenEvent(
   return false;
 }
 
+function parseStreamActionResults(
+  value: unknown,
+): ChatActionResultSummary[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (result) =>
+        result !== null &&
+        typeof result === "object" &&
+        !Array.isArray(result) &&
+        typeof result.success === "boolean" &&
+        ["actionName", "text", "error"].every(
+          (key) => result[key] === undefined || typeof result[key] === "string",
+        ) &&
+        (result.values === undefined ||
+          (result.values !== null &&
+            typeof result.values === "object" &&
+            !Array.isArray(result.values))),
+    )
+  ) {
+    // error-policy:J3 malformed receipts are not authority to perform a client
+    // handoff. Reject the whole collection rather than applying a partial one.
+    return undefined;
+  }
+  return value;
+}
+
 function applyStreamChatDoneEvent(
   parsed: StreamChatEvent,
   state: StreamChatState,
@@ -432,6 +464,9 @@ function applyStreamChatDoneEvent(
   if (parsed.historyRefreshRequired === true) {
     state.doneHistoryRefreshRequired = true;
   }
+  if (parsed.interrupted === true) {
+    state.doneInterrupted = true;
+  }
   if (typeof parsed.thought === "string" && parsed.thought.trim()) {
     state.doneThought = parsed.thought;
   }
@@ -448,9 +483,7 @@ function applyStreamChatDoneEvent(
   if (parsed.localInference && typeof parsed.localInference === "object") {
     state.doneLocalInference = parsed.localInference;
   }
-  if (Array.isArray(parsed.actionResults)) {
-    state.doneActionResults = parsed.actionResults;
-  }
+  state.doneActionResults = parseStreamActionResults(parsed.actionResults);
   if (parsed.usage) {
     state.doneUsage = {
       promptTokens: parsed.usage.promptTokens ?? 0,
@@ -473,11 +506,31 @@ function applyStreamChatDataLine(
   onStatus?: (status: ChatTurnStatus) => void,
   onToolEvent?: (event: ChatToolCallEvent) => void,
   eventName?: string,
+  onReplyReady?: (actionResults: ChatActionResultSummary[]) => void,
 ): boolean {
   const parsed = parseStreamChatDataLine(line, eventName);
   if (!parsed) return false;
   if (parsed.type === "token") {
     return applyStreamChatTokenEvent(parsed, state, onToken);
+  }
+  if (parsed.type === "reply_ready") {
+    // The agent has settled the authoritative user-visible reply, but may
+    // still be persisting receipts and message metadata before `done`. Render
+    // this snapshot immediately and keep the stream open for that terminal
+    // bookkeeping. Treat it exactly like a non-provisional text snapshot so
+    // it replaces any provisional action callback instead of appending or
+    // speaking both versions.
+    applyStreamChatTokenEvent(
+      { ...parsed, provisional: false },
+      state,
+      onToken,
+    );
+    const actionResults = parseStreamActionResults(parsed.actionResults);
+    if (actionResults?.length && !state.replyReadyActionsDelivered) {
+      state.replyReadyActionsDelivered = true;
+      onReplyReady?.(actionResults);
+    }
+    return false;
   }
   if (parsed.type === "status") {
     // Additive: a non-terminal status event. Surface it (when a consumer wants
@@ -823,6 +876,15 @@ function generateSharedTurnCorrelation(): string | null {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex
     .slice(6, 8)
     .join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
+/** Mint the closed-schema id adopted by the dedicated agent inference timer. */
+function generateDedicatedTraceId(): string | null {
+  if (typeof globalThis.crypto?.getRandomValues !== "function") return null;
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 /** Clamp the warming barrier's advertised `Retry-After` (seconds) into ms. */
@@ -1979,7 +2041,12 @@ export class ElizaClient {
     }
     if (isDedicatedCloudRequest) {
       for (const key of Object.keys(headers)) {
-        if (DEDICATED_CLOUD_CORS_BLOCKED_HEADERS.has(key.toLowerCase())) {
+        const normalized = key.toLowerCase();
+        if (
+          DEDICATED_CLOUD_CORS_BLOCKED_HEADERS.has(normalized) ||
+          (normalized === "x-eliza-trace-id" &&
+            !isInferenceTraceId(headers[key]))
+        ) {
           delete headers[key];
         }
       }
@@ -2255,7 +2322,17 @@ export class ElizaClient {
   }
 
   connectWs(): void {
-    if (shouldTreatAsConnectedWithoutWebSocket(this.baseUrl)) {
+    // Infer REST-only policy from the page only for implicit same-origin
+    // clients. An injected realtime target keeps its existing socket and
+    // retry policy, even when its hostname resembles a REST-only API host.
+    const effectiveBase =
+      this.baseUrl ||
+      (getInjectedWsBase()
+        ? ""
+        : typeof window !== "undefined"
+          ? window.location.origin
+          : "");
+    if (shouldTreatAsConnectedWithoutWebSocket(effectiveBase)) {
       this.backoffMs = 500;
       this.reconnectAttempt = 0;
       this.disconnectedAt = null;
@@ -2478,10 +2555,10 @@ export class ElizaClient {
         // connected-over-REST state and keep probing in the background (see
         // scheduleReconnect's 30s loop) so live updates resume on WS recovery.
         if (
-          isDedicatedCloudAgentBase(this.baseUrl) ||
+          isDedicatedCloudAgentBase(effectiveBase) ||
           // Control-plane hosts serve chat over REST/SSE and can never
           // complete a WS upgrade (#18172) — same non-fatal degrade.
-          isElizaCloudControlPlaneBase(this.baseUrl)
+          isElizaCloudControlPlaneBase(effectiveBase)
         ) {
           this.connectionState = "connected";
           this.disconnectedAt = null;
@@ -2789,8 +2866,14 @@ export class ElizaClient {
 
   // --- Text normalization helpers (used by chat domain methods) ---
 
-  normalizeAssistantText(text: string): string {
+  normalizeAssistantText(
+    text: string,
+    options?: { interrupted?: boolean },
+  ): string {
     if (typeof text !== "string") return GENERIC_NO_RESPONSE_TEXT;
+    // Interrupted receipts contain only the text generated before cancellation;
+    // their typed status must not become an invented reply or rewrite a partial.
+    if (options?.interrupted === true) return text;
     const stripped = stripAssistantStageDirections(
       extractAssistantReplyText(text) ?? text,
     );
@@ -2849,10 +2932,14 @@ export class ElizaClient {
      *  actually landed server-side is de-duped instead of double-delivered.
      *  Omit for a fresh send — a new id is generated. */
     clientMessageId?: string,
+    /** Settled action receipts, before terminal bookkeeping. This does not
+     *  complete the stream or release the caller's pending-turn ownership. */
+    onReplyReady?: (actionResults: ChatActionResultSummary[]) => void,
   ): Promise<{
     text: string;
     agentName: string;
     completed: boolean;
+    interrupted?: boolean;
     transcriptVisibility?: "internal";
     reasoning?: string;
     noResponseReason?: "ignored";
@@ -2881,6 +2968,9 @@ export class ElizaClient {
     // separate from the persisted/idempotent message ID so natural logs cannot
     // be joined back to message records or caller-supplied identifiers.
     const turnCorrelation = generateSharedTurnCorrelation();
+    const dedicatedTraceId = isDedicatedCloudAgentBase(this.baseUrl)
+      ? generateDedicatedTraceId()
+      : null;
     const res = await this.rawRequest(
       path,
       {
@@ -2888,6 +2978,7 @@ export class ElizaClient {
         headers: {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
+          ...(dedicatedTraceId ? { "X-Eliza-Trace-Id": dedicatedTraceId } : {}),
           ...(turnCorrelation
             ? {
                 [SHARED_TURN_CORRELATION_HEADER]: turnCorrelation,
@@ -2929,6 +3020,7 @@ export class ElizaClient {
       doneUserMessageId: null,
       doneAssistantEphemeral: false,
       doneHistoryRefreshRequired: false,
+      doneInterrupted: false,
       doneThought: null,
       doneNoResponseReason: null,
       doneUsage: undefined,
@@ -2937,8 +3029,25 @@ export class ElizaClient {
       doneAccountConnect: undefined,
       doneLocalInference: undefined,
       doneActionResults: undefined,
+      replyReadyActionsDelivered: false,
       receivedDone: false,
     };
+
+    const notifyReplyReady = onReplyReady
+      ? (actionResults: ChatActionResultSummary[]) => {
+          // A buffered final frame may still be decoded after Stop. It can
+          // preserve transcript text, but must not initiate a client handoff.
+          if (signal?.aborted) return;
+          try {
+            onReplyReady(actionResults);
+          } catch (err) {
+            // error-policy:J4 an optional renderer handoff failed after the
+            // action settled; retain terminal receipts and close the stream
+            // normally instead of turning a successful effect into a retry.
+            logger.warn({ err }, "[ElizaClient] reply-ready consumer failed");
+          }
+        }
+      : undefined;
 
     // Contract: the API emits a terminal done/error frame and supports explicit
     // cancellation through the caller's AbortSignal. Do not infer failure from
@@ -3013,6 +3122,7 @@ export class ElizaClient {
               onStatus,
               onToolEvent,
               eventName,
+              notifyReplyReady,
             )
           ) {
             buffer = "";
@@ -3041,6 +3151,7 @@ export class ElizaClient {
             onStatus,
             onToolEvent,
             trailingEventName,
+            notifyReplyReady,
           );
         }
       }
@@ -3051,11 +3162,14 @@ export class ElizaClient {
       streamState.doneNoResponseReason === "ignored" ||
       (!streamState.receivedDone && rawReplyText.trim().length === 0)
         ? ""
-        : this.normalizeAssistantText(rawReplyText);
+        : this.normalizeAssistantText(rawReplyText, {
+            interrupted: streamState.doneInterrupted,
+          });
     return {
       text: resolvedText,
       agentName: streamState.doneAgentName ?? "Eliza",
       completed: streamState.receivedDone,
+      ...(streamState.doneInterrupted ? { interrupted: true } : {}),
       ...(streamState.doneTranscriptVisibility
         ? { transcriptVisibility: streamState.doneTranscriptVisibility }
         : {}),

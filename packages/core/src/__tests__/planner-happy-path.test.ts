@@ -9,10 +9,10 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CONNECTOR_ACCOUNT_SERVICE_TYPE } from "../connectors/account-manager";
 import { BUILTIN_RESPONSE_HANDLER_FIELD_EVALUATORS } from "../runtime/builtin-field-evaluators";
 import { ResponseHandlerFieldRegistry } from "../runtime/response-handler-field-registry";
 import {
-	NO_REPORTABLE_TOOL_OUTCOME_MESSAGE,
 	runV5MessageRuntimeStage1,
 	wrapSingleTurnVisibleCallback,
 } from "../services/message";
@@ -277,6 +277,70 @@ function readRecordedTrajectories(agentId: string): unknown[] {
 }
 
 describe("v5 happy path — message handler → planner → executor → evaluator", () => {
+	it("builds current catalog hierarchy for separate runtimes with the same action names", async () => {
+		for (const grouped of [true, false]) {
+			const child = makeMockAction({
+				name: "CATALOG_FLOW_CHILD",
+				handler: async () => ({ success: true, text: "Child result" }),
+			});
+			const parent = makeMockAction({
+				name: "CATALOG_FLOW_PARENT",
+				subActions: grouped ? [child.name] : [],
+				handler: async () => ({ success: true, text: "Parent result" }),
+			});
+			const read = makeMockAction({
+				name: "CATALOG_FLOW_READ",
+				handler: async () => ({ success: true, text: "Read current data." }),
+			});
+			const runtime = makeRuntime({
+				actions: [read, parent, child],
+				responses: [
+					{
+						expectModelType: ModelType.RESPONSE_HANDLER,
+						body: stage1Response({ contexts: ["general"] }),
+					},
+					{
+						expectModelType: ModelType.ACTION_PLANNER,
+						body: {
+							text: "",
+							toolCalls: [{ id: "read-current", name: read.name, args: {} }],
+						},
+					},
+					{
+						expectModelType: ModelType.RESPONSE_HANDLER,
+						body: JSON.stringify({
+							success: true,
+							decision: "FINISH",
+							thought: "The read completed.",
+							messageToUser: "Read current data.",
+						}),
+					},
+				],
+			});
+			const result = await runV5MessageRuntimeStage1({
+				runtime,
+				message: makeMessage("Read current data."),
+				state: makeState(),
+				responseId: RESPONSE_ID,
+			});
+			expect(result.kind).toBe("planned_reply");
+			expect(runtime.logger.debug).toHaveBeenCalledWith(
+				expect.objectContaining({
+					actionSurface: expect.objectContaining({
+						catalogParentCount: grouped ? 2 : 3,
+						tierAParents: grouped
+							? [parent.name, read.name]
+							: [child.name, parent.name, read.name],
+						tierAChildrenByParent: expect.objectContaining({
+							[parent.name]: grouped ? [child.name] : [],
+						}),
+					}),
+				}),
+				"Built v5 planner action surface",
+			);
+		}
+	});
+
 	it("enters the coding planner directly without a HANDLE_RESPONSE model call", async () => {
 		const fileHandler = vi.fn(async () => ({
 			success: true,
@@ -1256,6 +1320,13 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 						messageToUser: "Credential tunnel completed.",
 					}),
 				},
+				{
+					expectModelType: ModelType.ACTION_PLANNER,
+					body: {
+						text: "The service returned no deliverable confirmation.",
+						toolCalls: [],
+					},
+				},
 			],
 		});
 
@@ -2168,6 +2239,12 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 			vi.fn<
 				(payload: import("../types/streaming").StreamingToolCallPayload) => void
 			>();
+		const onToolResult =
+			vi.fn<
+				(
+					payload: import("../types/streaming").StreamingToolResultPayload,
+				) => void
+			>();
 
 		const result = await runWithStreamingContext(
 			{
@@ -2175,6 +2252,10 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 				onToolCall: (payload) => {
 					order.push("onToolCall");
 					onToolCall(payload);
+				},
+				onToolResult: (payload) => {
+					order.push("onToolResult");
+					onToolResult(payload);
 				},
 			},
 			() =>
@@ -2189,8 +2270,9 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 		expect(result.kind).toBe("planned_reply");
 		// The running_tool announcement precedes execution so the chat SSE
 		// surface shows activity while the tool runs, not after.
-		expect(order).toEqual(["onToolCall", "handler"]);
+		expect(order).toEqual(["onToolCall", "handler", "onToolResult"]);
 		expect(onToolCall).toHaveBeenCalledTimes(1);
+		expect(onToolResult).toHaveBeenCalledTimes(1);
 		const payload = onToolCall.mock.calls[0]?.[0];
 		expect(payload?.toolCall).toMatchObject({
 			name: "VIEWS",
@@ -2198,6 +2280,303 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 			arguments: { action: "show", view: "notes" },
 		});
 		expect(payload?.metadata).toMatchObject({ deterministic: true });
+		expect(onToolResult.mock.calls[0]?.[0]).toMatchObject({
+			toolCallId: payload?.toolCall.id,
+			status: "completed",
+		});
+	});
+
+	it("does not announce a deterministic parent that the dispatcher gate refuses", async () => {
+		const parent = makeMockAction({
+			name: "OWNER_PARENT",
+			roleGate: "OWNER",
+			subActions: ["OWNER_CHILD"],
+			handler: async () => ({ success: true, text: "must not run" }),
+		});
+		const evaluator = {
+			name: "test.force_refused_deterministic_parent",
+			priority: 10,
+			deterministicActions: ["OWNER_PARENT"],
+			shouldRun: () => true,
+			evaluate: () => ({
+				requiresTool: true,
+				clearReply: true,
+				deterministicToolCall: { name: "OWNER_PARENT" },
+			}),
+		} satisfies import("../runtime/response-handler-evaluators").ResponseHandlerEvaluator;
+		const runtime = makeRuntime({
+			actions: [parent],
+			responseHandlerEvaluators: [evaluator],
+			responses: [
+				{
+					expectModelType: ModelType.RESPONSE_HANDLER,
+					body: stage1Response({
+						contexts: ["general"],
+						candidateActionNames: ["OWNER_PARENT"],
+						thought: "The parent is deterministic.",
+					}),
+				},
+				{
+					expectModelType: ModelType.TEXT_SMALL,
+					body: JSON.stringify({
+						response: "The action did not return a confirmed result.",
+					}),
+				},
+			],
+		});
+		const calls: import("../types/streaming").StreamingToolCallPayload[] = [];
+		const results: import("../types/streaming").StreamingToolResultPayload[] =
+			[];
+
+		await runWithStreamingContext(
+			{
+				onToolCall: (payload) => calls.push(payload),
+				onToolResult: (payload) => results.push(payload),
+			},
+			() =>
+				runV5MessageRuntimeStage1({
+					runtime,
+					message: makeMessage("run owner parent"),
+					state: makeState(),
+					responseId: RESPONSE_ID,
+				}),
+		);
+
+		expect(
+			calls.filter((payload) =>
+				payload.toolCall.id.startsWith("response-handler:"),
+			),
+		).toHaveLength(0);
+		expect(
+			results.filter((payload) =>
+				payload.toolCallId?.startsWith("response-handler:"),
+			),
+		).toHaveLength(0);
+	});
+
+	it("lets a deterministic sub-planner own streaming without an orphan parent announcement", async () => {
+		const parent = makeMockAction({
+			name: "CALENDAR_PARENT",
+			subActions: ["CALENDAR_CHILD"],
+			handler: async () => ({ success: true, text: "must not run" }),
+		});
+		const child = makeMockAction({
+			name: "CALENDAR_CHILD",
+			handler: async () => ({ success: true, text: "child complete" }),
+		});
+		const evaluator = {
+			name: "test.force_deterministic_subplanner",
+			priority: 10,
+			deterministicActions: ["CALENDAR_PARENT"],
+			shouldRun: () => true,
+			evaluate: () => ({
+				requiresTool: true,
+				clearReply: true,
+				deterministicToolCall: { name: "CALENDAR_PARENT" },
+			}),
+		} satisfies import("../runtime/response-handler-evaluators").ResponseHandlerEvaluator;
+		const runtime = makeRuntime({
+			actions: [parent, child],
+			responseHandlerEvaluators: [evaluator],
+			responses: [
+				{
+					expectModelType: ModelType.RESPONSE_HANDLER,
+					body: stage1Response({
+						contexts: ["general"],
+						candidateActionNames: ["CALENDAR_PARENT"],
+						thought: "Use the deterministic calendar parent.",
+					}),
+				},
+				{
+					expectModelType: ModelType.ACTION_PLANNER,
+					body: {
+						text: "Run the child.",
+						toolCalls: [{ id: "child-1", name: "CALENDAR_CHILD", args: {} }],
+					},
+				},
+				{
+					expectModelType: ModelType.RESPONSE_HANDLER,
+					body: JSON.stringify({
+						success: true,
+						decision: "FINISH",
+						thought: "The child completed.",
+						messageToUser: "Calendar complete.",
+					}),
+				},
+			],
+		});
+		const calls: import("../types/streaming").StreamingToolCallPayload[] = [];
+		const results: import("../types/streaming").StreamingToolResultPayload[] =
+			[];
+
+		await runWithStreamingContext(
+			{
+				onToolCall: (payload) => calls.push(payload),
+				onToolResult: (payload) => results.push(payload),
+			},
+			() =>
+				runV5MessageRuntimeStage1({
+					runtime,
+					message: makeMessage("check calendar"),
+					state: makeState(),
+					responseId: RESPONSE_ID,
+				}),
+		);
+
+		expect(
+			calls.some((payload) =>
+				payload.toolCall.id.startsWith("response-handler:"),
+			),
+		).toBe(false);
+		for (const call of calls) {
+			expect(
+				results.filter((result) => result.toolCallId === call.toolCall.id),
+			).toHaveLength(1);
+		}
+	});
+
+	it("settles a deterministic announcement exactly once when its handler throws", async () => {
+		const action = makeMockAction({
+			name: "THROWING_ACTION",
+			handler: async () => {
+				throw new Error("deterministic boom");
+			},
+		});
+		const evaluator = {
+			name: "test.force_throwing_deterministic_action",
+			priority: 10,
+			deterministicActions: ["THROWING_ACTION"],
+			shouldRun: () => true,
+			evaluate: () => ({
+				requiresTool: true,
+				clearReply: true,
+				deterministicToolCall: { name: "THROWING_ACTION" },
+			}),
+		} satisfies import("../runtime/response-handler-evaluators").ResponseHandlerEvaluator;
+		const runtime = makeRuntime({
+			actions: [action],
+			responseHandlerEvaluators: [evaluator],
+			responses: [
+				{
+					expectModelType: ModelType.RESPONSE_HANDLER,
+					body: stage1Response({
+						contexts: ["general"],
+						candidateActionNames: ["THROWING_ACTION"],
+						thought: "Run the deterministic action.",
+					}),
+				},
+				{
+					expectModelType: ModelType.TEXT_SMALL,
+					body: JSON.stringify({
+						response: "The action did not return a confirmed result.",
+					}),
+				},
+			],
+		});
+		const calls: import("../types/streaming").StreamingToolCallPayload[] = [];
+		const results: import("../types/streaming").StreamingToolResultPayload[] =
+			[];
+
+		await runWithStreamingContext(
+			{
+				onToolCall: (payload) => calls.push(payload),
+				onToolResult: (payload) => results.push(payload),
+			},
+			() =>
+				runV5MessageRuntimeStage1({
+					runtime,
+					message: makeMessage("run the throwing action"),
+					state: makeState(),
+					responseId: RESPONSE_ID,
+				}),
+		);
+
+		expect(calls).toHaveLength(1);
+		expect(results).toHaveLength(1);
+		expect(results[0]).toMatchObject({
+			toolCallId: calls[0]?.toolCall.id,
+			status: "failed",
+		});
+	});
+
+	it("settles a deterministic announcement exactly once when executor infrastructure throws", async () => {
+		const handler = vi.fn(async () => ({
+			success: true,
+			text: "must not run",
+		}));
+		const action = {
+			...makeMockAction({ name: "CONNECTOR_ACTION", handler }),
+			connectorAccountPolicy: { provider: "gmail" },
+		} as Action;
+		const evaluator = {
+			name: "test.force_infrastructure_failure",
+			priority: 10,
+			deterministicActions: ["CONNECTOR_ACTION"],
+			shouldRun: () => true,
+			evaluate: () => ({
+				requiresTool: true,
+				clearReply: true,
+				deterministicToolCall: { name: "CONNECTOR_ACTION" },
+			}),
+		} satisfies import("../runtime/response-handler-evaluators").ResponseHandlerEvaluator;
+		const runtime = makeRuntime({
+			actions: [action],
+			responseHandlerEvaluators: [evaluator],
+			responses: [
+				{
+					expectModelType: ModelType.RESPONSE_HANDLER,
+					body: stage1Response({
+						contexts: ["general"],
+						candidateActionNames: ["CONNECTOR_ACTION"],
+						thought: "Run the deterministic connector action.",
+					}),
+				},
+				{
+					expectModelType: ModelType.TEXT_SMALL,
+					body: JSON.stringify({
+						response: "The action did not return a confirmed result.",
+					}),
+				},
+			],
+		});
+		const infrastructureError = new Error("account storage unavailable");
+		Object.assign(runtime, {
+			getService: vi.fn((serviceType: string) => {
+				if (serviceType === CONNECTOR_ACCOUNT_SERVICE_TYPE) {
+					throw infrastructureError;
+				}
+				return null;
+			}),
+		});
+		const calls: import("../types/streaming").StreamingToolCallPayload[] = [];
+		const results: import("../types/streaming").StreamingToolResultPayload[] =
+			[];
+
+		await runWithStreamingContext(
+			{
+				onToolCall: (payload) => calls.push(payload),
+				onToolResult: (payload) => results.push(payload),
+			},
+			() =>
+				runV5MessageRuntimeStage1({
+					runtime,
+					message: makeMessage("run the connector action"),
+					state: makeState(),
+					responseId: RESPONSE_ID,
+				}),
+		);
+
+		expect(handler).not.toHaveBeenCalled();
+		expect(calls).toHaveLength(1);
+		expect(results).toHaveLength(1);
+		expect(results[0]).toMatchObject({
+			toolCallId: calls[0]?.toolCall.id,
+			status: "failed",
+			result: expect.objectContaining({
+				success: false,
+				error: infrastructureError.message,
+			}),
+		});
 	});
 
 	// tj-a835d4c6da235f: an accepted, internal VIEWS effect must produce an
@@ -2264,7 +2643,16 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 								body: { text: options.postToolReply, toolCalls: [] },
 							},
 						]
-					: []),
+					: handlerResult.text || handlerResult.userFacingText
+						? []
+						: [
+								{
+									expectModelType: ModelType.TEXT_SMALL,
+									body: JSON.stringify({
+										response: "The action did not return a confirmed result.",
+									}),
+								},
+							]),
 			],
 		});
 		const result = await runV5MessageRuntimeStage1({
@@ -2277,7 +2665,9 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 		expect(getCalls(runtime).map((call) => call.modelType)).toEqual(
 			options.postToolReply
 				? [ModelType.RESPONSE_HANDLER, ModelType.ACTION_PLANNER]
-				: [ModelType.RESPONSE_HANDLER],
+				: handlerResult.text || handlerResult.userFacingText
+					? [ModelType.RESPONSE_HANDLER]
+					: [ModelType.RESPONSE_HANDLER, ModelType.TEXT_SMALL],
 		);
 		return result.kind === "planned_reply"
 			? result.result.responseContent?.text
@@ -2341,6 +2731,28 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 		expect(text).toBe("Notes are open whenever you're ready.");
 	});
 
+	it("uses post-tool synthesis when the Stage 1 navigation reply omits the destination", async () => {
+		const text = await runDeterministicViewsTurn(
+			{
+				success: true,
+				text: JSON.stringify({
+					effect: "view_navigation",
+					status: "accepted",
+					viewId: "notes",
+					label: "Notes",
+					path: "/notes",
+				}),
+				transcriptVisibility: "internal",
+				modelReplyRequired: true,
+			},
+			{
+				stageOneReply: "On it.",
+				postToolReply: "Notes are open.",
+			},
+		);
+		expect(text).toBe("Notes are open.");
+	});
+
 	it("uses post-tool synthesis instead of releasing an unrelated mutation claim", async () => {
 		const text = await runDeterministicViewsTurn(
 			{
@@ -2363,9 +2775,9 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 		expect(text).toBe("Notes are open. I didn't change any of them.");
 	});
 
-	it("keeps the no-result fallback for a deterministic success with no receipt at all", async () => {
+	it("uses a model reply for a deterministic success without a reportable result", async () => {
 		const text = await runDeterministicViewsTurn({ success: true });
-		expect(text).toBe(NO_REPORTABLE_TOOL_OUTCOME_MESSAGE);
+		expect(text).toBe("The action did not return a confirmed result.");
 	});
 
 	it("lets the model write the final reply after a deterministic tool completes", async () => {
@@ -2668,6 +3080,12 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 					expectModelType: ModelType.RESPONSE_HANDLER,
 					body: stage1Response({ contexts: ["general"] }),
 				},
+				{
+					expectModelType: ModelType.TEXT_SMALL,
+					body: JSON.stringify({
+						response: "The action did not return a confirmed result.",
+					}),
+				},
 			],
 		});
 
@@ -2681,12 +3099,13 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 		expect(calls).toBe(0);
 		expect(getCalls(runtime).map((call) => call.modelType)).toEqual([
 			ModelType.RESPONSE_HANDLER,
+			ModelType.TEXT_SMALL,
 		]);
 		expect(result.kind).toBe("planned_reply");
 		if (result.kind === "planned_reply") {
 			expect(result.result.actionResults).toMatchObject([{ success: false }]);
 			expect(result.result.responseContent?.text).toBe(
-				NO_REPORTABLE_TOOL_OUTCOME_MESSAGE,
+				"The action did not return a confirmed result.",
 			);
 			expect(result.result.responseContent?.text).not.toMatch(
 				/owner|role|permission/i,
@@ -2757,6 +3176,12 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 						contexts: ["general"],
 						candidateActionNames: ["VIEWS"],
 						replyText: "on it.",
+					}),
+				},
+				{
+					expectModelType: ModelType.TEXT_SMALL,
+					body: JSON.stringify({
+						response: "The action did not return a confirmed result.",
 					}),
 				},
 			],
@@ -2928,6 +3353,12 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 					expectModelType: ModelType.RESPONSE_HANDLER,
 					body: stage1Response({ contexts: ["general"] }),
 				},
+				{
+					expectModelType: ModelType.TEXT_SMALL,
+					body: JSON.stringify({
+						response: "The action did not return a confirmed result.",
+					}),
+				},
 			],
 		});
 
@@ -2941,12 +3372,13 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 		expect(calls).toBe(0);
 		expect(getCalls(runtime).map((call) => call.modelType)).toEqual([
 			ModelType.RESPONSE_HANDLER,
+			ModelType.TEXT_SMALL,
 		]);
 		expect(result.kind).toBe("planned_reply");
 		if (result.kind === "planned_reply") {
 			expect(result.result.actionResults).toMatchObject([{ success: false }]);
 			expect(result.result.responseContent?.text).toBe(
-				NO_REPORTABLE_TOOL_OUTCOME_MESSAGE,
+				"The action did not return a confirmed result.",
 			);
 		}
 	});
@@ -3030,6 +3462,12 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 					expectModelType: ModelType.RESPONSE_HANDLER,
 					body: stage1Response({ contexts: ["general"] }),
 				},
+				{
+					expectModelType: ModelType.TEXT_SMALL,
+					body: JSON.stringify({
+						response: "The action did not return a confirmed result.",
+					}),
+				},
 			],
 		});
 
@@ -3042,12 +3480,13 @@ describe("v5 happy path — message handler → planner → executor → evaluat
 
 		expect(getCalls(runtime).map((call) => call.modelType)).toEqual([
 			ModelType.RESPONSE_HANDLER,
+			ModelType.TEXT_SMALL,
 		]);
 		expect(result.kind).toBe("planned_reply");
 		if (result.kind === "planned_reply") {
 			expect(result.result.actionResults).toMatchObject([{ success: false }]);
 			expect(result.result.responseContent?.text).toBe(
-				NO_REPORTABLE_TOOL_OUTCOME_MESSAGE,
+				"The action did not return a confirmed result.",
 			);
 			expect(result.result.responseContent?.text).not.toContain(
 				internalDiagnostic,

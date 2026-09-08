@@ -70,6 +70,8 @@ import {
   scanDropInPlugins,
 } from "./plugin-types.ts";
 
+export { isWorkspacePluginSourceFallbackAllowed } from "./workspace-plugin-source.ts";
+
 /** {name,error} for a plugin that failed to load on the last resolve pass. */
 export interface FailedPluginDetail {
   name: string;
@@ -242,38 +244,42 @@ async function stageDependencyIntoNodeModules(params: {
   dependencyName: string;
   sourceNodeModulesDir: string;
   targetNodeModulesDir: string;
-}): Promise<boolean> {
+}): Promise<string | null> {
   const sourcePath = packageNodeModulesEntryPath(
     params.sourceNodeModulesDir,
     params.dependencyName,
   );
   if (!(await pathEntryExists(sourcePath))) {
-    return false;
+    return null;
   }
+
+  const sourcePackageRoot =
+    (await resolveSymlinkTargetIfPresent(sourcePath)) ?? sourcePath;
 
   const targetPath = packageNodeModulesEntryPath(
     params.targetNodeModulesDir,
     params.dependencyName,
   );
   if (await pathEntryExists(targetPath)) {
-    return true;
+    return sourcePackageRoot;
   }
 
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   const stat = await fs.lstat(sourcePath);
   if (stat.isSymbolicLink()) {
-    return copySymlinkedPackageForStaging(
+    const staged = await copySymlinkedPackageForStaging(
       sourcePath,
       targetPath,
       params.dependencyName,
     );
+    return staged ? sourcePackageRoot : null;
   }
   if (!stat.isDirectory()) {
-    return false;
+    return null;
   }
 
   await copyPluginTreeWithoutEscapingSymlinks(sourcePath, targetPath);
-  return true;
+  return sourcePackageRoot;
 }
 
 function rewriteDistExportTargetToSource(value: unknown): unknown {
@@ -389,13 +395,13 @@ async function stageWorkspaceSourceDependencyIntoNodeModules(params: {
   dependencyName: string;
   sourceNodeModulesDir: string;
   targetNodeModulesDir: string;
-}): Promise<boolean> {
+}): Promise<string | null> {
   const sourcePath = packageNodeModulesEntryPath(
     params.sourceNodeModulesDir,
     params.dependencyName,
   );
   if (!(await pathEntryExists(sourcePath))) {
-    return false;
+    return null;
   }
 
   const resolvedSourcePath =
@@ -406,7 +412,7 @@ async function stageWorkspaceSourceDependencyIntoNodeModules(params: {
     !(await pathEntryExists(sourceSrcPath)) ||
     !(await pathEntryExists(sourcePackageJsonPath))
   ) {
-    return false;
+    return null;
   }
   if (
     !(await sourcePackageContainsRootEntrypointImports({
@@ -414,7 +420,7 @@ async function stageWorkspaceSourceDependencyIntoNodeModules(params: {
       sourcePackageRoot: resolvedSourcePath,
     }))
   ) {
-    return false;
+    return null;
   }
 
   const targetPath = packageNodeModulesEntryPath(
@@ -422,7 +428,7 @@ async function stageWorkspaceSourceDependencyIntoNodeModules(params: {
     params.dependencyName,
   );
   if (await pathEntryExists(targetPath)) {
-    return true;
+    return resolvedSourcePath;
   }
 
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
@@ -447,7 +453,7 @@ async function stageWorkspaceSourceDependencyIntoNodeModules(params: {
     dependencyName: params.dependencyName,
     targetPackageRoot: targetPath,
   });
-  return true;
+  return resolvedSourcePath;
 }
 
 async function ensureStagedPackageDependencies(params: {
@@ -455,7 +461,16 @@ async function ensureStagedPackageDependencies(params: {
   packageName: string;
   packageRoot: string;
   stagedPackageRoot: string;
+  ancestorPackageRoots?: ReadonlySet<string>;
 }): Promise<void> {
+  const canonicalPackageRoot = await fs.realpath(params.packageRoot);
+  const ancestorPackageRoots = params.ancestorPackageRoots ?? new Set<string>();
+  if (ancestorPackageRoots.has(canonicalPackageRoot)) {
+    return;
+  }
+  const dependencyAncestorRoots = new Set(ancestorPackageRoots);
+  dependencyAncestorRoots.add(canonicalPackageRoot);
+
   const stagedNodeModulesPath = path.join(
     params.stagedPackageRoot,
     "node_modules",
@@ -493,9 +508,9 @@ async function ensureStagedPackageDependencies(params: {
       await fs.rm(stagedDependencyPath, { recursive: true, force: true });
     }
 
-    let staged = false;
+    let stagedSourceRoot: string | null = null;
     for (const sourceNodeModulesDir of sourceNodeModulesDirs) {
-      staged = shouldStageFromSource
+      stagedSourceRoot = shouldStageFromSource
         ? await stageWorkspaceSourceDependencyIntoNodeModules({
             dependencyName: dependency.name,
             sourceNodeModulesDir,
@@ -506,16 +521,29 @@ async function ensureStagedPackageDependencies(params: {
             sourceNodeModulesDir,
             targetNodeModulesDir: stagedNodeModulesPath,
           });
-      if (staged) {
+      if (stagedSourceRoot) {
         break;
       }
     }
 
-    if (!staged && !dependency.optional) {
+    if (!stagedSourceRoot && !dependency.optional) {
       logger.warn(
         `[eliza] Staged plugin ${params.packageName} is missing declared dependency ${dependency.name}`,
       );
+      continue;
     }
+
+    if (!stagedSourceRoot) continue;
+    await ensureStagedPackageDependencies({
+      installRoot: params.installRoot,
+      packageName: dependency.name,
+      packageRoot: stagedSourceRoot,
+      stagedPackageRoot: packageNodeModulesEntryPath(
+        stagedNodeModulesPath,
+        dependency.name,
+      ),
+      ancestorPackageRoots: dependencyAncestorRoots,
+    });
   }
 }
 
@@ -546,27 +574,6 @@ function resolveWorkspaceRoots(): string[] {
   // setup:upstreams symlinks handle plugin resolution for development. Set
   // ELIZA_WORKSPACE_ROOT explicitly for external override scenarios.
   return uniquePaths([process.cwd()]);
-}
-
-/**
- * Whether the runtime may fall back to importing a plugin's unbuilt workspace
- * `src/` tree (bypassing package `exports`/`dist`) when normal resolution fails.
- *
- * Dev-only escape hatch: a production build must resolve plugins through the
- * bundle or node_modules, never a sibling `src/` tree. Honors the existing
- * `ELIZA_DISABLE_WORKSPACE_PLUGIN_OVERRIDES` kill switch, refuses in a
- * production runtime (mirrors crash-injection's production signal), and allows
- * an explicit `ELIZA_ALLOW_WORKSPACE_PLUGIN_SRC=1` override for production
- * debugging.
- */
-export function isWorkspacePluginSourceFallbackAllowed(
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  if (env.ELIZA_DISABLE_WORKSPACE_PLUGIN_OVERRIDES === "1") return false;
-  const isProduction =
-    env.NODE_ENV === "production" || env.ELIZA_BUILD_VARIANT === "production";
-  if (isProduction) return env.ELIZA_ALLOW_WORKSPACE_PLUGIN_SRC === "1";
-  return true;
 }
 
 function getWorkspacePluginOverridePath(pluginName: string): string | null {

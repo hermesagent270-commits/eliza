@@ -87,6 +87,7 @@ import {
 } from "@elizaos/ui/api";
 import {
   type AuthStatusState,
+  getAuthStatusSnapshot,
   isAuthenticatedNow,
   subscribeAuthStatus,
 } from "@elizaos/ui/auth-status";
@@ -309,6 +310,9 @@ export function startLifeOpsActivitySignalCapture(
     error.status === 503 &&
     error.path === "/api/lifeops/activity-signals";
 
+  const isRateLimitedError = (error: unknown): boolean =>
+    isApiError(error) && error.kind === "http" && error.status === 429;
+
   const isExpectedTransientError = (error: unknown): boolean =>
     isApiError(error) && (error.kind === "network" || error.kind === "timeout");
 
@@ -343,6 +347,10 @@ export function startLifeOpsActivitySignalCapture(
       return;
     }
     if (isRuntimeUnavailableError(error)) {
+      standDownActivitySignals();
+      return;
+    }
+    if (isRateLimitedError(error)) {
       standDownActivitySignals();
       return;
     }
@@ -446,6 +454,10 @@ export function startLifeOpsActivitySignalCapture(
         return null;
       }
       if (isRuntimeUnavailableError(error)) {
+        standDownActivitySignals();
+        return null;
+      }
+      if (isRateLimitedError(error)) {
         standDownActivitySignals();
         return null;
       }
@@ -791,13 +803,21 @@ export function startLifeOpsActivitySignalCapture(
   };
 
   const handleAuthStatus = (state: AuthStatusState): void => {
-    updateSessionAvailability(state.phase === "authenticated", "runtime-ready");
+    updateSessionAvailability(
+      state.phase === "authenticated" && state.access.role === "OWNER",
+      "runtime-ready",
+    );
   };
 
   // Subscribe before reading the snapshot so an auth publication racing this
   // startup cannot be missed. A duplicate authenticated publication is a no-op.
   const unsubscribeAuthStatus = subscribeAuthStatus(handleAuthStatus);
-  if (isAuthenticatedNow()) {
+  const initialAuth = getAuthStatusSnapshot();
+  if (
+    isAuthenticatedNow() &&
+    initialAuth.phase === "authenticated" &&
+    initialAuth.access.role === "OWNER"
+  ) {
     updateSessionAvailability(true, "mount");
   }
 

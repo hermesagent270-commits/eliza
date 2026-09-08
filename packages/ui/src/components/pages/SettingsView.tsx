@@ -8,6 +8,7 @@
  * plus normal product visibility; `initialSection` deep-links a specific
  * section. Also reusable in modal form (`inModal`).
  */
+
 import { isViewVisible } from "@elizaos/core";
 import { isPermissionId, type PermissionId } from "@elizaos/shared";
 import {
@@ -19,6 +20,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { useAgentElement } from "../../agent-surface";
+import { reportUserViewSwitch } from "../../chat/view-navigation-report";
 import { isManagedCloudRuntime } from "../../cloud/managed-cloud-runtime";
 import { getBootConfig } from "../../config/boot-config-store";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -34,6 +36,10 @@ import { PermissionPrimingModal } from "../permissions/PermissionPrimingModal";
 import { resolvePrimingSet } from "../permissions/permission-priming";
 import { DesktopSettingsNavigation } from "../settings/DesktopSettingsNavigation";
 import { SettingsHubList } from "../settings/SettingsHubList";
+import {
+  resolveSettingsExperience,
+  settingsSectionMatchesExperience,
+} from "../settings/settings-experience";
 import { buildSettingsNavigationGroups } from "../settings/settings-navigation-model";
 import {
   resolveSettingsRuntimeCapabilities,
@@ -267,6 +273,7 @@ export function SettingsView({
   const cloudOnlyBranding = getBootConfig().branding.cloudOnly === true;
   const managedCloudRuntime =
     isManagedCloudRuntime(runtimeTarget) || cloudOnlyBranding;
+  const settingsExperience = resolveSettingsExperience(managedCloudRuntime);
   const enabledKinds = useEnabledViewKinds();
   const frontendPlatform = getFrontendPlatform();
   const androidCloudBuild = isAndroidCloudBuild();
@@ -323,8 +330,9 @@ export function SettingsView({
       availableSections.filter((section) => {
         if (section.id === "wallet-rpc" && walletEnabled === false)
           return false;
-        if (section.cloudOnly && !managedCloudRuntime) return false;
-        if (section.hideOnManagedCloud && managedCloudRuntime) return false;
+        if (!settingsSectionMatchesExperience(section, settingsExperience)) {
+          return false;
+        }
         if (!isViewVisible(section, enabledKinds)) return false;
         if (section.hideOnCloud && androidCloudBuild) return false;
         return true;
@@ -333,7 +341,7 @@ export function SettingsView({
       androidCloudBuild,
       availableSections,
       enabledKinds,
-      managedCloudRuntime,
+      settingsExperience,
       walletEnabled,
     ],
   );
@@ -507,6 +515,10 @@ export function SettingsView({
     ? desktopSectionDef
     : activeSectionDef;
 
+  useEffect(() => {
+    reportUserViewSwitch("settings", "/settings", displayedSectionDef?.id);
+  }, [displayedSectionDef?.id]);
+
   // Mobile keeps the uniform top bar: the hub shows "Settings" and a section
   // shows its title with a back action. Connector detail is one level deeper
   // (detail → connectors index → settings hub → launcher).
@@ -565,6 +577,9 @@ export function SettingsView({
       >
         <div
           data-testid="settings-shell"
+          data-settings-presentation={
+            isNativeCompactSettings ? "compact-native" : "workspace"
+          }
           className={cn(
             "flex h-full min-h-0 w-full overflow-hidden",
             isWideSettings ? "flex-row" : "flex-col",
@@ -588,8 +603,7 @@ export function SettingsView({
           {!isWideSettings ? (
             <div
               className={cn(
-                isNativeCompactSettings &&
-                  "pt-[max(calc(var(--safe-area-top,0px)-2rem),0.75rem)]",
+                isNativeCompactSettings && "pt-[var(--safe-area-top,0px)]",
               )}
             >
               <ViewHeader
