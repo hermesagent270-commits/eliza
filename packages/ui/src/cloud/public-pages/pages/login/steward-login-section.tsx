@@ -17,8 +17,16 @@
  */
 
 import { Capacitor } from "@capacitor/core";
+import type {
+  LoginAuthResult,
+  LoginMfaRequiredResult,
+  LoginProviders,
+  LoginTelegramLoginPayload,
+} from "@elizaos/login";
+import { LoginApiError, LoginAuth } from "@elizaos/login";
 import {
   buildStewardOAuthAuthorizeUrl as buildStewardOAuthAuthorizeUrlCore,
+  clearStoredStewardToken,
   generateStewardOAuthState,
   hasStewardAuthedCookie,
   peekStewardOAuthState,
@@ -26,13 +34,6 @@ import {
   StewardSessionError,
   writeStoredStewardToken,
 } from "@elizaos/shared/steward-session-client";
-import type {
-  StewardAuthResult,
-  StewardMfaRequiredResult,
-  StewardProviders,
-  StewardTelegramLoginPayload,
-} from "@stwd/sdk";
-import { StewardApiError, StewardAuth } from "@stwd/sdk";
 import type { CountryCode } from "libphonenumber-js/min";
 import { AlertCircle, Phone } from "lucide-react";
 import {
@@ -50,7 +51,7 @@ import {
   useNavigate,
   useSearchParams,
 } from "react-router-dom";
-import { toast } from "sonner";
+import { toast } from "../../../../bridge/toast";
 import {
   DiscordIcon,
   TelegramIcon,
@@ -65,6 +66,7 @@ import {
   SelectTrigger,
 } from "../../../../components/ui/select";
 import { openExternalUrl } from "../../../../utils/openExternalUrl";
+import { hasHydratableStewardToken } from "../../../lib/steward-session";
 import { useCloudT } from "../../../shell/CloudI18nProvider";
 import {
   configuredStewardTenantId,
@@ -140,10 +142,6 @@ const Github = ({ className }: { className?: string }) => (
 );
 
 const STEWARD_TENANT_ID = configuredStewardTenantId(DEFAULT_STEWARD_TENANT_ID);
-const PLAYWRIGHT_TEST_AUTH_ENABLED =
-  import.meta.env.VITE_PLAYWRIGHT_TEST_AUTH === "true" ||
-  (typeof process !== "undefined" &&
-    process.env?.NEXT_PUBLIC_PLAYWRIGHT_TEST_AUTH === "true");
 /**
  * Optional local-stack API key for the "Continue with local test account"
  * shortcut. It is never bundled by default: the operator who arms
@@ -161,10 +159,6 @@ function readLocalDedicatedTestApiKey(): string | null {
   if (typeof fromNext === "string" && fromNext.trim()) return fromNext.trim();
   return null;
 }
-const LOCAL_DEDICATED_TEST_API_KEY = readLocalDedicatedTestApiKey();
-const LOCAL_DEDICATED_TEST_SIGN_IN_ENABLED =
-  PLAYWRIGHT_TEST_AUTH_ENABLED && LOCAL_DEDICATED_TEST_API_KEY !== null;
-
 type AuthStep =
   | "idle"
   | "loading"
@@ -269,7 +263,7 @@ const WalletButtons = lazy(() =>
   import("./wallet-buttons").then((m) => ({ default: m.WalletButtons })),
 );
 
-function hasAnyWalletProvider(providers: StewardProviders): boolean {
+function hasAnyWalletProvider(providers: LoginProviders): boolean {
   return Boolean(providers.siwe || providers.siws);
 }
 
@@ -282,7 +276,7 @@ const STEWARD_OAUTH_PROVIDERS = [
 ] as const satisfies readonly StewardOAuthProvider[];
 
 function isStewardOAuthProviderEnabled(
-  providers: StewardProviders,
+  providers: LoginProviders,
   provider: StewardOAuthProvider,
 ): boolean {
   if (providers.oauth?.includes(provider)) return true;
@@ -290,7 +284,7 @@ function isStewardOAuthProviderEnabled(
   return providers[provider] === true;
 }
 
-const DEFAULT_PROVIDERS: StewardProviders = {
+const DEFAULT_PROVIDERS: LoginProviders = {
   passkey: true,
   email: true,
   sms: false,
@@ -309,8 +303,8 @@ const STEWARD_PROVIDER_DISCOVERY_TIMEOUT_MS = 15_000;
 type LoginTranslator = ReturnType<typeof useCloudT>;
 
 function requireCompletedAuth(
-  result: StewardAuthResult | StewardMfaRequiredResult,
-): StewardAuthResult {
+  result: LoginAuthResult | LoginMfaRequiredResult,
+): LoginAuthResult {
   if ("mfaRequired" in result) {
     throw new Error("MFA required. This client does not support it yet.");
   }
@@ -447,8 +441,8 @@ function describeEmailLoginError(error: unknown, fallback: string): string {
   return getErrorMessage(error, fallback);
 }
 
-let cachedStewardProviders: StewardProviders | null = null;
-let stewardProvidersPromise: Promise<StewardProviders> | null = null;
+let cachedStewardProviders: LoginProviders | null = null;
+let stewardProvidersPromise: Promise<LoginProviders> | null = null;
 let stewardProvidersRequestGeneration = 0;
 
 function discardStewardProvidersRequest(): void {
@@ -469,7 +463,7 @@ function providersSessionCacheKey(): string {
   return `${PROVIDERS_SESSION_CACHE_PREFIX}:${STEWARD_TENANT_ID}`;
 }
 
-function normalizeStewardProviders(value: unknown): StewardProviders | null {
+function normalizeStewardProviders(value: unknown): LoginProviders | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -515,7 +509,7 @@ function normalizeStewardProviders(value: unknown): StewardProviders | null {
   };
 }
 
-function readSessionCachedProviders(): StewardProviders | null {
+function readSessionCachedProviders(): LoginProviders | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = window.sessionStorage.getItem(providersSessionCacheKey());
@@ -530,7 +524,7 @@ function readSessionCachedProviders(): StewardProviders | null {
   }
 }
 
-function writeSessionCachedProviders(providers: StewardProviders): void {
+function writeSessionCachedProviders(providers: LoginProviders): void {
   if (typeof window === "undefined") return;
   try {
     window.sessionStorage.setItem(
@@ -546,8 +540,8 @@ function writeSessionCachedProviders(providers: StewardProviders): void {
 }
 
 function loadStewardProviders(auth: {
-  getProviders: () => Promise<StewardProviders>;
-}): Promise<StewardProviders> {
+  getProviders: () => Promise<LoginProviders>;
+}): Promise<LoginProviders> {
   const requestGeneration = stewardProvidersRequestGeneration;
   // Cached capabilities may paint non-wallet controls early, but they are not
   // current authorization. Always query Steward so wallet providers remain
@@ -581,8 +575,8 @@ function loadStewardProviders(auth: {
 }
 
 function loadStewardProvidersWithTimeout(auth: {
-  getProviders: () => Promise<StewardProviders>;
-}): Promise<StewardProviders> {
+  getProviders: () => Promise<LoginProviders>;
+}): Promise<LoginProviders> {
   return new Promise((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
       reject(
@@ -601,6 +595,16 @@ function loadStewardProvidersWithTimeout(auth: {
 }
 
 export default function StewardLoginSection() {
+  // Resolve the build-time test switches for each mounted section. Vite still
+  // replaces these values in production builds, while tests can exercise each
+  // supported configuration without invalidating React's module instance.
+  const PLAYWRIGHT_TEST_AUTH_ENABLED =
+    import.meta.env.VITE_PLAYWRIGHT_TEST_AUTH === "true" ||
+    (typeof process !== "undefined" &&
+      process.env?.NEXT_PUBLIC_PLAYWRIGHT_TEST_AUTH === "true");
+  const LOCAL_DEDICATED_TEST_API_KEY = readLocalDedicatedTestApiKey();
+  const LOCAL_DEDICATED_TEST_SIGN_IN_ENABLED =
+    PLAYWRIGHT_TEST_AUTH_ENABLED && LOCAL_DEDICATED_TEST_API_KEY !== null;
   const t = useCloudT();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -616,7 +620,7 @@ export default function StewardLoginSection() {
 
   const auth = useMemo(() => {
     const privateSession = new Map<string, string>();
-    return new StewardAuth({
+    return new LoginAuth({
       baseUrl: stewardApiUrl,
       tenantId: STEWARD_TENANT_ID,
       // Steward writes successful exchanges into its configured storage before
@@ -722,7 +726,7 @@ export default function StewardLoginSection() {
   >(null);
   const [providerDiscoveryAttempt, setProviderDiscoveryAttempt] = useState(0);
   const providerDiscoveryEpochRef = useRef(0);
-  const [providers, setProviders] = useState<StewardProviders | null>(
+  const [providers, setProviders] = useState<LoginProviders | null>(
     () =>
       cachedStewardProviders ??
       readSessionCachedProviders() ??
@@ -897,7 +901,12 @@ export default function StewardLoginSection() {
     return () => {
       cancelled = true;
     };
-  }, [auth, completingCallback, providerDiscoveryAttempt]);
+  }, [
+    auth,
+    completingCallback,
+    providerDiscoveryAttempt,
+    PLAYWRIGHT_TEST_AUTH_ENABLED,
+  ]);
 
   const retryProviderDiscovery = useCallback(() => {
     // Return to the reserved loading geometry and trigger a fresh server query;
@@ -921,7 +930,7 @@ export default function StewardLoginSection() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [PLAYWRIGHT_TEST_AUTH_ENABLED]);
 
   useEffect(() => {
     const code = consumeStewardCodeFromQuery();
@@ -1032,13 +1041,21 @@ export default function StewardLoginSection() {
     return () => {
       cancelled = true;
     };
-  }, [navigate, pathname, searchParams]);
+  }, [navigate, pathname, searchParams, PLAYWRIGHT_TEST_AUTH_ENABLED]);
 
   useEffect(() => {
     if (PLAYWRIGHT_TEST_AUTH_ENABLED) return;
     if (searchParams.get("switchAccount") === "1") return;
-    if (searchParams.get("code") || searchParams.get("error")) {
+    if (searchParams.get("code")) {
       setSessionRecoveryComplete(true);
+      return;
+    }
+    if (searchParams.get("error")) {
+      // The callback-cleanup effect removes the error query before this hook
+      // starts passive session recovery. Keep the provider controls gated
+      // across that navigation edge so a stale stored session cannot race a
+      // newly-started OTP flow during the intervening render.
+      setSessionRecoveryComplete(false);
       return;
     }
 
@@ -1047,7 +1064,16 @@ export default function StewardLoginSection() {
 
     const tryRecoverSession = async () => {
       try {
-        const storedToken = readStoredStewardToken();
+        let storedToken = readStoredStewardToken();
+        if (storedToken && !hasHydratableStewardToken()) {
+          // Expired, malformed, and identity-less local proofs cannot restore
+          // a session. Clear them before any network call so an unusable token
+          // cannot hide fresh sign-in controls behind session sync. A valid
+          // HttpOnly cookie is independent and still recovers below.
+          await clearStoredStewardToken();
+          storedToken = null;
+          window.dispatchEvent(new CustomEvent("steward-token-sync"));
+        }
         if (storedToken) {
           try {
             // Session recovery establishes auth only. A pending Telegram claim
@@ -1095,7 +1121,7 @@ export default function StewardLoginSection() {
     return () => {
       cancelled = true;
     };
-  }, [searchParams]);
+  }, [searchParams, PLAYWRIGHT_TEST_AUTH_ENABLED]);
 
   useEffect(() => {
     const errorCode = searchParams.get("error");
@@ -1343,7 +1369,7 @@ export default function StewardLoginSection() {
   function isBrowserOwnedWebAuthnFailure(e: unknown, msg: string): boolean {
     return (
       (typeof DOMException !== "undefined" && e instanceof DOMException) ||
-      (e instanceof StewardApiError &&
+      (e instanceof LoginApiError &&
         e.status === 0 &&
         (msg.includes("webauthn authentication") ||
           msg.includes("webauthn registration")))
@@ -1365,7 +1391,7 @@ export default function StewardLoginSection() {
 
   function isPasskeyAlreadyRegistered(e: unknown): boolean {
     const msg = getErrorMessage(e, "").toLowerCase();
-    if (e instanceof StewardApiError && e.status === 409) {
+    if (e instanceof LoginApiError && e.status === 409) {
       const data = e.data;
       if (
         typeof data === "object" &&
@@ -1786,7 +1812,7 @@ export default function StewardLoginSection() {
     );
   }
 
-  async function handleTelegramAuth(payload: StewardTelegramLoginPayload) {
+  async function handleTelegramAuth(payload: LoginTelegramLoginPayload) {
     setLoading("telegram");
     setError(null);
     try {

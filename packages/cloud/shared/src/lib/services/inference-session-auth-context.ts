@@ -131,7 +131,7 @@ async function hydrateAuthoritativeDecision(params: {
   if (!user.organization.is_active) {
     return rejection(params.stewardUserId, 403, "organization_inactive");
   }
-  if (await adminService.shouldBlockUser(user.id)) {
+  if (await adminService.shouldBlockUserConsistent(user.id)) {
     return {
       v: INFERENCE_AUTH_CONTEXT_VERSION,
       cachedAt: Date.now(),
@@ -186,7 +186,7 @@ async function enforceStrongSessionBoundary(
   } catch (error) {
     if (error instanceof InferenceCredentialRevokedError) {
       return error.reason === "session_revoked" || error.reason === "session_binding_revoked"
-        ? { kind: "rejected", status: 401 }
+        ? { kind: "rejected", status: 401, reason: "credential_inactive" }
         : { kind: "suspended", userId: resolved.ctx.userId };
     }
     throw error;
@@ -328,7 +328,7 @@ export async function resolveInferenceSessionAuthContext(
     if (!user?.organization_id || !user.organization) {
       return { kind: "rejected", status: 401 };
     }
-    if (await adminService.shouldBlockUser(user.id)) {
+    if (await adminService.shouldBlockUserConsistent(user.id)) {
       return { kind: "suspended", userId: user.id };
     }
     return await enforceStrongSessionBoundary(

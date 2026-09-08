@@ -16,9 +16,14 @@ process.env.MOCK_REDIS = "1";
 process.env.SKIP_AGENT_SANDBOX_ENSURE = "1";
 
 import { pushSchema } from "drizzle-kit/api";
-import { closeDatabaseConnectionsForTests, dbWrite } from "../../db/client";
+import {
+  closeDatabaseConnectionsForTests,
+  dbWrite,
+  getPgliteClientForTests,
+} from "../../db/client";
 import { agentSandboxesRepository } from "../../db/repositories/agent-sandboxes";
 import { type Job, jobsRepository } from "../../db/repositories/jobs";
+import { installOrganizationPolicyTestSchema } from "../../db/repositories/organization-policy-test-fixture";
 import { agentNodeIncarnationHistories } from "../../db/schemas/agent-node-incarnation-histories";
 import {
   type AgentSandboxBackup,
@@ -32,6 +37,7 @@ import { generations } from "../../db/schemas/generations";
 import { jobExecutionLeases } from "../../db/schemas/job-execution-leases";
 import { jobs } from "../../db/schemas/jobs";
 import { organizations } from "../../db/schemas/organizations";
+import { providerAdmissions } from "../../db/schemas/provider-admissions";
 import { usageRecords } from "../../db/schemas/usage-records";
 import { userCharacters } from "../../db/schemas/user-characters";
 import { users } from "../../db/schemas/users";
@@ -339,9 +345,11 @@ beforeAll(async () => {
       agentSandboxes,
       jobs,
       jobExecutionLeases,
+      providerAdmissions,
     };
     const { apply } = await pushSchema(schema as never, dbWrite as never);
     await apply();
+    await installOrganizationPolicyTestSchema((query) => getPgliteClientForTests().exec(query));
   } catch {
     pgliteReady = false;
   }

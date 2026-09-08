@@ -392,6 +392,8 @@ const LIFEOPS_STATIC_ROUTES: RouteSpec[] = [
   { type: "GET", path: "/api/lifeops/social/summary" },
   { type: "GET", path: "/api/lifeops/overview" },
   { type: "GET", path: "/api/lifeops/todos" },
+  { type: "POST", path: "/api/lifeops/definitions/:id/complete" },
+  { type: "POST", path: "/api/lifeops/definitions/:id/reopen" },
   { type: "GET", path: "/api/lifeops/connectors/health/status" },
   { type: "GET", path: "/api/lifeops/health/summary" },
   { type: "GET", path: "/api/lifeops/money/dashboard" },
@@ -439,6 +441,7 @@ const LIFEOPS_STATIC_ROUTES: RouteSpec[] = [
   { type: "POST", path: "/api/lifeops/goals" },
   { type: "POST", path: "/api/lifeops/features/toggle" },
   { type: "GET", path: "/api/lifeops/agreements" },
+  { type: "POST", path: "/api/lifeops/agreements" },
   {
     type: "POST",
     path: "/api/lifeops/agreement-uploads",

@@ -31,7 +31,7 @@ test("preserves Workerd WebSocket upgrade responses without rewrapping", () => {
   expect(
     decorateFullAppDispatchResponse(
       upgrade,
-      "11111111-1111-4111-8111-111111111111",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       12,
       8,
     ),
@@ -222,7 +222,7 @@ test("answers crypto payment confirmation preflight before shard loading", async
 });
 
 test("dispatches provider webhooks without full-app bootstrap", async () => {
-  const traceId = "11111111-1111-4111-8111-111111111111";
+  const traceId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
   const env = {
     ENVIRONMENT: "test",
     NODE_ENV: "test",
@@ -286,22 +286,36 @@ test("matches only supported provider webhook routes", () => {
   expect(isElizaAppWebhookPath("/api/eliza-app/webhook")).toBe(false);
 });
 
-test("matches only the managed Discord gateway route", () => {
+test("matches only dependency-bounded managed Discord gateway routes", () => {
+  expect(isInternalDiscordGatewayPath("/api/internal/auth/token")).toBe(true);
   expect(
     isInternalDiscordGatewayPath("/api/internal/discord/eliza-app/messages"),
+  ).toBe(true);
+  expect(
+    isInternalDiscordGatewayPath(
+      "/api/internal/discord/eliza-app/pending-greetings",
+    ),
   ).toBe(true);
   expect(
     isInternalDiscordGatewayPath("/api/internal/discord/eliza-app/messages/"),
   ).toBe(false);
   expect(
     isInternalDiscordGatewayPath(
+      "/api/internal/discord/eliza-app/pending-greetings/",
+    ),
+  ).toBe(false);
+  expect(
+    isInternalDiscordGatewayPath(
       "/api/internal/discord/eliza-app/messages/admin",
     ),
   ).toBe(false);
+  expect(isInternalDiscordGatewayPath("/api/internal/auth/token/refresh")).toBe(
+    false,
+  );
 });
 
 test("dispatches managed Discord turns without full-app bootstrap", async () => {
-  const traceId = "33333333-3333-4333-8333-333333333333";
+  const traceId = "cccccccccccccccccccccccccccccccc";
   const env = {
     ENVIRONMENT: "test",
     NODE_ENV: "test",
@@ -355,6 +369,90 @@ test("dispatches managed Discord turns without full-app bootstrap", async () => 
   );
   expect(warmResponse.headers.get("server-timing")).not.toContain(
     "discord_module_init",
+  );
+});
+
+test("dispatches proactive greeting claims without full-app bootstrap", async () => {
+  const traceId = "44444444444444444444444444444444";
+  const env = {
+    ENVIRONMENT: "test",
+    NODE_ENV: "test",
+    REDIS_RATE_LIMITING: "false",
+    CACHE_ENABLED: "false",
+    THIN_INFERENCE_ENTRY_ENABLED: "false",
+    BLOB: {},
+  } as unknown as AppEnv["Bindings"];
+  const executionCtx = {
+    waitUntil: () => undefined,
+    passThroughOnException: () => undefined,
+  } as unknown as ExecutionContext;
+
+  const response = await cloudApiWorker.fetch(
+    new Request(
+      "https://api.eliza.app/api/internal/discord/eliza-app/pending-greetings",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-eliza-trace-id": traceId,
+        },
+        body: JSON.stringify({ action: "claim" }),
+      },
+    ),
+    env,
+    executionCtx,
+  );
+
+  expect(response.status).toBe(401);
+  expect(response.headers.get("x-eliza-trace-id")).toBe(traceId);
+  expect(response.headers.get("x-eliza-discord-path")).toBe("thin");
+  expect(response.headers.get("server-timing")).toContain(
+    "discord_entry_dispatch",
+  );
+  expect(response.headers.get("server-timing")).not.toContain(
+    "full_app_dispatch",
+  );
+});
+
+test("dispatches gateway token exchange without full-app bootstrap", async () => {
+  const traceId = "55555555555555555555555555555555";
+  const env = {
+    ENVIRONMENT: "test",
+    NODE_ENV: "test",
+    REDIS_RATE_LIMITING: "false",
+    CACHE_ENABLED: "false",
+    THIN_INFERENCE_ENTRY_ENABLED: "false",
+    BLOB: {},
+  } as unknown as AppEnv["Bindings"];
+  const executionCtx = {
+    waitUntil: () => undefined,
+    passThroughOnException: () => undefined,
+  } as unknown as ExecutionContext;
+
+  const response = await cloudApiWorker.fetch(
+    new Request("https://api.eliza.app/api/internal/auth/token", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-eliza-trace-id": traceId,
+      },
+      body: JSON.stringify({
+        pod_name: "gateway-test",
+        service: "gateway-discord",
+      }),
+    }),
+    env,
+    executionCtx,
+  );
+
+  expect(response.status).toBe(503);
+  expect(response.headers.get("x-eliza-trace-id")).toBe(traceId);
+  expect(response.headers.get("x-eliza-discord-path")).toBe("thin");
+  expect(response.headers.get("server-timing")).toContain(
+    "discord_entry_dispatch",
+  );
+  expect(response.headers.get("server-timing")).not.toContain(
+    "full_app_dispatch",
   );
 });
 
@@ -417,7 +515,7 @@ test("preserves provider authentication on the thin webhook path", async () => {
 });
 
 test("correlates and times dispatch outside full-app middleware", async () => {
-  const traceId = "22222222-2222-4222-8222-222222222222";
+  const traceId = "dddddddddddddddddddddddddddddddd";
   const env = {
     ENVIRONMENT: "test",
     NODE_ENV: "test",
@@ -1714,7 +1812,7 @@ describe("cloud-api worker entrypoint", () => {
     expect(config.migrations).toBeUndefined();
   });
 
-  test("binds the global native limiter in every Worker environment and keeps inference routes gate-free", async () => {
+  test("binds the global native limiter for general routes and keeps inference shells gate-free", async () => {
     type RateLimitBinding = {
       name?: string;
       simple?: { limit?: number; period?: number };
@@ -1745,8 +1843,8 @@ describe("cloud-api worker entrypoint", () => {
 
     // #17805 retired the per-route native gates from the generative hot path:
     // rate policy rides the IAC v2 admission snapshot through the org-level
-    // limiter. The inference route sources must stay free of per-route native
-    // bindings, while both Worker app builders keep the global gate.
+    // limiter. The inference route sources and thin shell must stay free of
+    // native bindings, while the general bootstrap app keeps the global gate.
     const [
       chat,
       completions,
@@ -1768,6 +1866,6 @@ describe("cloud-api worker entrypoint", () => {
       expect(source).not.toContain("bindingName:");
     }
     expect(bootstrapApp).toContain('bindingName: "GLOBAL_RATE_LIMITER"');
-    expect(inferenceApp).toContain('bindingName: "GLOBAL_RATE_LIMITER"');
+    expect(inferenceApp).not.toContain('bindingName: "GLOBAL_RATE_LIMITER"');
   });
 });

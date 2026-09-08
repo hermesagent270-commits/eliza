@@ -170,9 +170,11 @@ export default defineConfig({
       "scripts/android-sms-gateway-template.test.mjs",
       "scripts/stage-android-agent.test.mjs",
       "scripts/stage-desktop-fused-lib-staleness.test.mjs",
+      "scripts/ensure-fused-inference-install.test.mjs",
       "scripts/build-helpers/arm64-simd.test.mjs",
       "scripts/lib/electrobun-loopback-hardening.test.mjs",
       "scripts/lib/linux-artifact-permissions.test.mjs",
+      "scripts/lib/fused-artifact-integrity.test.mjs",
       // Uses Node.js built-in test runner (node:test), not vitest; runs in
       // `bun run test:script-suites` (node --test list).
       "scripts/store-listing-urls.test.mjs",
@@ -260,6 +262,10 @@ export default defineConfig({
       {
         find: /^@elizaos\/auth\/(.+)$/,
         replacement: path.join(authSrc, "$1"),
+      },
+      {
+        find: /^@elizaos\/login$/,
+        replacement: path.join(monorepoRoot, "packages/login/src/sdk/index.ts"),
       },
       { find: /^@elizaos\/ui$/, replacement: path.join(uiDir, "src/index.ts") },
       {

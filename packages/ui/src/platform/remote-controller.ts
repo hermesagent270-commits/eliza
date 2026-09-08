@@ -82,10 +82,15 @@ function isOpenedStartReceipt(
   );
 }
 
-const nativeRemoteController =
-  Capacitor.registerPlugin<NativeRemoteControllerPlugin>(
-    "RemoteControllerIdentity",
-  );
+let nativeRemoteController: NativeRemoteControllerPlugin | null = null;
+
+function getNativeRemoteController(): NativeRemoteControllerPlugin {
+  nativeRemoteController ??=
+    Capacitor.registerPlugin<NativeRemoteControllerPlugin>(
+      "RemoteControllerIdentity",
+    );
+  return nativeRemoteController;
+}
 
 function isNativeController(): boolean {
   const platform = Capacitor.getPlatform();
@@ -121,7 +126,7 @@ export async function getOrCreateRemoteControllerIdentity(input: {
     );
   }
   if (isNativeController()) {
-    const identity = await nativeRemoteController.getOrCreateIdentity({
+    const identity = await getNativeRemoteController().getOrCreateIdentity({
       ownerId: input.ownerId,
       displayName: input.displayName ?? "My iPhone",
       platform: Capacitor.getPlatform(),
@@ -177,8 +182,13 @@ export async function createRemoteCommand(input: {
   recoveredPending: boolean;
   bindingDigest: string;
 }> {
+  if (isUnsupportedNativeIOS()) {
+    throw new Error(
+      "Secure mobile command signing is unavailable until the native iOS plugin is installed.",
+    );
+  }
   if (isNativeController()) {
-    const result = await nativeRemoteController.createCommand({
+    const result = await getNativeRemoteController().createCommand({
       ownerId: input.ownerId,
       grantId: input.grantId,
       grantRevision: input.grantRevision,
@@ -230,8 +240,13 @@ export async function acknowledgeRemoteCommandEnqueue(input: {
   commandId: string;
   bindingDigest: string;
 }): Promise<boolean> {
+  if (isUnsupportedNativeIOS()) {
+    throw new Error(
+      "Secure mobile enqueue acknowledgement is unavailable until the native iOS plugin is installed.",
+    );
+  }
   if (isNativeController()) {
-    const result = await nativeRemoteController.acknowledgeEnqueue(input);
+    const result = await getNativeRemoteController().acknowledgeEnqueue(input);
     if (!isRecord(result) || typeof result.acknowledged !== "boolean") {
       throw new Error("Secure mobile enqueue acknowledgement is unavailable.");
     }
@@ -254,8 +269,13 @@ export async function openRemoteCommandResult(input: {
   command: SignedRemoteCommand;
   targetIdentity: RemoteTargetPublicIdentity;
 }): Promise<{ status: string; result?: RemoteJsonValue; errorCode?: string }> {
+  if (isUnsupportedNativeIOS()) {
+    throw new Error(
+      "Secure mobile result decryption is unavailable until the native iOS plugin is installed.",
+    );
+  }
   if (isNativeController()) {
-    const result = await nativeRemoteController.openResult(input);
+    const result = await getNativeRemoteController().openResult(input);
     if (!isOpenedResult(result))
       throw new Error("Secure mobile result decryption is unavailable.");
     return result;
@@ -281,8 +301,13 @@ export async function openRemoteCommandStartReceipt(input: {
   command: SignedRemoteCommand;
   targetIdentity: RemoteTargetPublicIdentity;
 }): Promise<{ startedAt: number; executionId: string }> {
+  if (isUnsupportedNativeIOS()) {
+    throw new Error(
+      "Secure mobile start receipt verification is unavailable until the native iOS plugin is installed.",
+    );
+  }
   if (isNativeController()) {
-    const result = await nativeRemoteController.openStartReceipt(input);
+    const result = await getNativeRemoteController().openStartReceipt(input);
     if (!isOpenedStartReceipt(result))
       throw new Error(
         "Secure mobile start receipt verification is unavailable.",
@@ -308,8 +333,13 @@ export async function clearRemoteControllerSessionState(input: {
   controllerDeviceId: string;
   sessionId: string;
 }): Promise<boolean> {
+  if (isUnsupportedNativeIOS()) {
+    throw new Error(
+      "Secure mobile session cleanup is unavailable until the native iOS plugin is installed.",
+    );
+  }
   if (isNativeController()) {
-    const result = await nativeRemoteController.clearSessionState(input);
+    const result = await getNativeRemoteController().clearSessionState(input);
     if (!isRecord(result) || typeof result.cleared !== "boolean") {
       throw new Error("Secure mobile session cleanup is unavailable.");
     }

@@ -14,7 +14,6 @@ import {
   Bot,
   Brain,
   Cloud,
-  Keyboard,
   KeyRound,
   LayoutGrid,
   Lock,
@@ -96,13 +95,8 @@ const ConnectorsSection = lazy(() =>
   import("./ConnectorsSection").then((m) => ({ default: m.ConnectorsSection })),
 );
 const DesktopIntegrationSection = lazy(() =>
-  import("./cloud-panel/sections/GeneralSection").then((m) => ({
+  import("./DesktopIntegrationSection").then((m) => ({
     default: m.DesktopIntegrationSection,
-  })),
-);
-const DesktopShortcutsSection = lazy(() =>
-  import("./cloud-panel/sections/ShortcutsSection").then((m) => ({
-    default: m.ShortcutsSection,
   })),
 );
 const RuntimeSettingsSection = lazy(() =>
@@ -439,18 +433,6 @@ const BUILTIN_SECTION_DEFINITIONS: readonly BuiltinSectionDefinition[] = [
     labelKey: "settings.sections.notifications.label",
     prominence: "secondary",
     Component: WebPushSettingsSection,
-  },
-  {
-    ...nonCatalogMeta("shortcuts"),
-    catalog: false,
-    icon: Keyboard,
-    tone: "neutral",
-    hue: "slate",
-    labelKey: "settings.sections.shortcuts.label",
-    defaultTitle: "Shortcuts",
-    order: 8.5,
-    requires: ["desktop-bridge"],
-    Component: DesktopShortcutsSection,
   },
   {
     id: "runtime",

@@ -17,6 +17,7 @@
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { Hono } from "hono";
+import { ApiError } from "@/lib/api/cloud-worker-errors";
 // `mock.module` is process-global: spread the real auth module so this file's
 // partial mock (only `requireUserOrApiKeyWithOrg`) does not drop the other auth
 // exports (e.g. `requireUserOrApiKey`) for later test files in the same run.
@@ -86,7 +87,28 @@ const admitOrganizationInference = mock(
     };
   },
 );
+const inferenceCredential = {
+  kind: "api_key" as const,
+  credentialId: "key-1",
+  userId: USER_ID,
+};
+let routeExecutionCtx:
+  | { waitUntil(promise: Promise<unknown>): void }
+  | undefined;
+const requireGenerativeRouteCaller = mock(
+  async (
+    _c?: unknown,
+    _options?: { deferStrongCredentialCheck?: boolean },
+  ) => ({
+    user: { id: USER_ID, organization_id: ORG_ID },
+    apiKeyId: null,
+    appScopeId: null,
+    authSource: "compatibility" as const,
+    credential: inferenceCredential,
+  }),
+);
 const charactersGetById = mock();
+const assertInferenceCredentialActive = mock(async () => undefined);
 class InsufficientCreditsError extends Error {
   constructor(
     public readonly required: number,
@@ -105,17 +127,25 @@ mock.module("@/lib/services/organization-inference-admission", () => ({
 }));
 
 mock.module("@/api-app/lib/generative-route-auth", () => ({
-  getGenerativeExecutionContext: () => undefined,
-  requireGenerativeRouteCaller: async () => ({
-    user: { id: USER_ID, organization_id: ORG_ID },
-    apiKeyId: null,
-    appScopeId: null,
-    authSource: "compatibility",
-  }),
+  asGenerativeCacheApiError: (error: unknown) =>
+    error instanceof ApiError ? error : null,
+  getGenerativeExecutionContext: () => routeExecutionCtx,
+  resolveInferenceCredentialAdmissionDenial: () => null,
+  requireGenerativeRouteCaller,
+}));
+
+mock.module("@/lib/services/inference-credential-revocation", () => ({
+  assertInferenceCredentialActive,
 }));
 
 mock.module("@/lib/services/characters/characters", () => ({
-  charactersService: { getById: charactersGetById },
+  charactersService: {
+    getById: charactersGetById,
+    getByIdCacheOnly: async (id: string) => ({
+      kind: "ready" as const,
+      character: await charactersGetById(id),
+    }),
+  },
 }));
 
 const requireUserOrApiKeyWithOrg = mock();
@@ -208,6 +238,7 @@ function callChat(
 }
 
 beforeEach(() => {
+  routeExecutionCtx = undefined;
   getLanguageModel.mockClear();
   streamText.mockReset();
   resolveAnthropicThinkingBudgetTokens.mockReset();
@@ -223,9 +254,19 @@ beforeEach(() => {
   markProviderDispatched.mockReset();
   markProviderDispatched.mockResolvedValue(undefined);
   charactersGetById.mockReset();
+  assertInferenceCredentialActive.mockReset();
+  assertInferenceCredentialActive.mockResolvedValue(undefined);
+  requireGenerativeRouteCaller.mockReset();
   requireUserOrApiKeyWithOrg.mockReset();
 
   charactersGetById.mockResolvedValue(makeCharacter());
+  requireGenerativeRouteCaller.mockResolvedValue({
+    user: { id: USER_ID, organization_id: ORG_ID },
+    apiKeyId: null,
+    appScopeId: null,
+    authSource: "compatibility",
+    credential: inferenceCredential,
+  });
   requireUserOrApiKeyWithOrg.mockResolvedValue({
     id: USER_ID,
     organization_id: ORG_ID,
@@ -310,6 +351,61 @@ describe("Agent A2A billing", () => {
     });
     expect(reserve).not.toHaveBeenCalled();
     expect(streamText).not.toHaveBeenCalled();
+    expect(requireGenerativeRouteCaller).toHaveBeenCalledTimes(2);
+    for (const [, options] of requireGenerativeRouteCaller.mock.calls) {
+      expect(options).toMatchObject({ deferStrongCredentialCheck: true });
+    }
+    expect(assertInferenceCredentialActive).toHaveBeenCalledTimes(2);
+    expect(assertInferenceCredentialActive).toHaveBeenCalledWith(
+      ORG_ID,
+      inferenceCredential,
+    );
+  });
+
+  test("checks the deferred credential once when JSON parsing terminates before any resource or provider work", async () => {
+    const response = await app.request("/agents/agent-1/a2a", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not-json",
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: -32700, message: "Parse error" },
+    });
+    expect(assertInferenceCredentialActive).toHaveBeenCalledTimes(1);
+    expect(assertInferenceCredentialActive).toHaveBeenCalledWith(
+      ORG_ID,
+      inferenceCredential,
+    );
+    expect(admitOrganizationInference).not.toHaveBeenCalled();
+    expect(reserve).not.toHaveBeenCalled();
+    expect(streamText).not.toHaveBeenCalled();
+  });
+
+  test("standing denial precedes agent lookup and preserves its safe reason", async () => {
+    requireGenerativeRouteCaller.mockRejectedValueOnce(
+      new ApiError(403, "access_denied", "Organization is inactive", {
+        reason: "organization_inactive",
+      }),
+    );
+
+    const response = await app.request("/agents/agent-1/a2a", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not-json",
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: -32002,
+        message: "Organization is inactive",
+        data: { reason: "organization_inactive" },
+      },
+      id: null,
+    });
+    expect(charactersGetById).not.toHaveBeenCalled();
   });
 
   test("settles once and records creator earnings on the happy path", async () => {
@@ -322,6 +418,10 @@ describe("Agent A2A billing", () => {
     };
 
     expect(response.status).toBe(200);
+    expect(admitOrganizationInference).toHaveBeenCalledWith(
+      expect.objectContaining({ credential: inferenceCredential }),
+    );
+    expect(assertInferenceCredentialActive).not.toHaveBeenCalled();
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(reconcile.mock.calls[0]?.[0]).toBeCloseTo(0.06, 12);
     expect(recordCreatorEarnings).toHaveBeenCalledWith(
@@ -334,6 +434,27 @@ describe("Agent A2A billing", () => {
     );
     expect(body.error).toBeUndefined();
     expect(body.result?.content).toBe("hello from model");
+  });
+
+  test("Worker chat opts into atomic admission at the provider boundary", async () => {
+    const retained: Promise<unknown>[] = [];
+    routeExecutionCtx = {
+      waitUntil(promise) {
+        retained.push(Promise.resolve(promise));
+      },
+    };
+    makeReservation({ adjustmentType: "none" });
+
+    const response = await callChat();
+
+    expect(response.status).toBe(200);
+    expect(admitOrganizationInference).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionCtx: routeExecutionCtx,
+        atomicProviderBoundary: true,
+      }),
+    );
+    await Promise.all(retained);
   });
 
   // Billing uses a conservative estimate without turning that estimate into a
@@ -473,6 +594,25 @@ describe("Agent A2A billing", () => {
     expect(reconcile).toHaveBeenCalledWith(0);
     expect(streamText).not.toHaveBeenCalled();
     expect(recordCreatorEarnings).not.toHaveBeenCalled();
+  });
+
+  test("a typed late dispatch denial remains a retryable JSON-RPC admission failure", async () => {
+    const reconcile = makeReservation({ adjustmentType: "refund" });
+    markProviderDispatched.mockRejectedValue(
+      new ApiError(
+        503,
+        "service_unavailable",
+        "dispatch admission unavailable",
+      ),
+    );
+
+    const response = await callChat();
+    const body = (await response.json()) as { error?: { code: number } };
+
+    expect(response.status).toBe(503);
+    expect(body.error?.code).toBe(-32004);
+    expect(reconcile).toHaveBeenCalledWith(0);
+    expect(streamText).not.toHaveBeenCalled();
   });
 
   // Regression for #10266 (A2A side).
