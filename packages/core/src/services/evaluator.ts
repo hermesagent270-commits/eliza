@@ -55,7 +55,6 @@ import type {
 import { EventType, ModelType } from "../types/index.ts";
 import { ChannelType } from "../types/primitives.ts";
 import { Service as BaseService } from "../types/service.ts";
-import { getUserMessageText } from "../utils/message-text.ts";
 import { providerRateLimitRetryAt } from "../utils/model-retry";
 import { isObjectRecord as isRecord } from "../utils/type-guards.ts";
 import {
@@ -183,12 +182,8 @@ const POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS_SETTING =
 	"POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS";
 /** Under the 131,072-token window the live post-turn model rejected at 137K and 151K prompt tokens (2026-09-13). */
 const POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS_DEFAULT = 60_000;
-const POST_TURN_EVALUATOR_TRIM_PASSES = 3;
-/** Inverse of estimateTokensFromChars with headroom so one pass normally lands under budget. */
-const POST_TURN_EVALUATOR_CHARS_PER_TOKEN = 3.5 * 1.1;
-const POST_TURN_EVALUATOR_SKIP_REASON = "input_budget_exceeded";
-const POST_TURN_EVALUATOR_SKIP_ERROR =
-	"Post-turn evaluator skipped: estimated prompt exceeds POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS";
+const POST_TURN_EVALUATOR_INPUT_BUDGET_ERROR_CODE =
+	"EVALUATOR_INPUT_BUDGET_EXCEEDED";
 /**
  * Opt-in per-result cap for the post-turn prompt. Unset keeps the complete
  * result projections (the lossless contract); a deployment on a small
@@ -197,12 +192,6 @@ const POST_TURN_EVALUATOR_SKIP_ERROR =
  */
 const POST_TURN_EVALUATOR_RESULT_MAX_CHARS_SETTING =
 	"POST_TURN_EVALUATOR_RESULT_MAX_CHARS";
-/** One rendered RECENT_MESSAGES row starts `HH:MM (relative time) [entityId] `. */
-const CONVERSATION_ROW_START = /^\d{2}:\d{2} \([^()\n]*\) \[[^\]\n]+\] /gm;
-/** Sections the RECENT_MESSAGES provider appends after its conversation block. */
-const CONVERSATION_BLOCK_END =
-	/\n\n# (?:Received Message|Focus your response|Recent conversations across verified accounts)\n/;
-
 function optionalPositiveIntegerSetting(
 	runtime: IAgentRuntime,
 	key: string,
@@ -242,89 +231,6 @@ function estimatePromptTokens(
 		messages: [{ role: "user", content: rendered.prompt }],
 		responseSchema: schema,
 	});
-}
-
-type ConversationBlockTrim = {
-	text: string;
-	omittedRows: number;
-};
-
-/**
- * Drops the oldest rows of the RECENT_MESSAGES conversation block in `text`
- * (formatMessages renders newest first, so the oldest rows close the block)
- * until at least `dropChars` are gone; the newest row always stays. Null when
- * there is no block or nothing to drop.
- */
-function trimConversationBlock(
-	text: string,
-	dropChars: number,
-): ConversationBlockTrim | null {
-	const headerAt = text.indexOf(CONVERSATION_MESSAGES_HEADER_PREFIX);
-	const headerEnd = headerAt >= 0 ? text.indexOf("\n", headerAt) : -1;
-	if (headerEnd < 0) return null;
-	const bodyStart = headerEnd + 1;
-	const endMatch = CONVERSATION_BLOCK_END.exec(text.slice(bodyStart));
-	const bodyEnd = endMatch ? bodyStart + endMatch.index : text.length;
-	const body = text.slice(bodyStart, bodyEnd);
-	const rowStarts = Array.from(
-		body.matchAll(CONVERSATION_ROW_START),
-		(match) => match.index ?? 0,
-	);
-	if (rowStarts.length < 2) return null;
-	const droppedChars = (kept: number): number =>
-		kept < rowStarts.length ? body.length - (rowStarts[kept] ?? 0) : 0;
-	let kept = rowStarts.length;
-	while (kept > 1 && droppedChars(kept) < dropChars) kept--;
-	if (kept === rowStarts.length) return null;
-	const omittedRows = rowStarts.length - kept;
-	const note = `[${omittedRows} older message(s) omitted for the post-turn evaluator input budget]\n`;
-	return {
-		omittedRows,
-		text: `${text.slice(0, bodyStart)}${body.slice(0, rowStarts[kept] ?? 0)}${note}${text.slice(bodyEnd)}`,
-	};
-}
-
-function trimProviderConversation(
-	state: State,
-	dropChars: number,
-): { state: State; omittedRows: number } | null {
-	const providers = state.data.providers;
-	const recent = providers?.RECENT_MESSAGES;
-	if (typeof recent?.text !== "string") return null;
-	const provider = trimConversationBlock(recent.text, dropChars);
-	const shared = trimConversationBlock(state.text, dropChars);
-	if (!provider || !shared) return null;
-	return {
-		omittedRows: shared.omittedRows,
-		state: {
-			...state,
-			text: shared.text,
-			data: {
-				...state.data,
-				providers: {
-					...providers,
-					RECENT_MESSAGES: { ...recent, text: provider.text },
-				},
-			},
-		},
-	};
-}
-
-function trimTranscript(
-	roomTranscript: Memory[] | null,
-	dropChars: number,
-): { roomTranscript: Memory[]; omittedRows: number } | null {
-	if (!roomTranscript || roomTranscript.length < 2) return null;
-	// Oldest rows go first; the newest row (the current turn) always stays.
-	const rows = [...roomTranscript];
-	let remaining = dropChars;
-	let omittedRows = 0;
-	while (remaining > 0 && rows.length > 1) {
-		const dropped = rows.shift() as Memory;
-		remaining -= getUserMessageText(dropped).length;
-		omittedRows += 1;
-	}
-	return omittedRows > 0 ? { roomTranscript: rows, omittedRows } : null;
 }
 
 function mergeStates(base: State | undefined, providerState: State): State {
@@ -431,8 +337,6 @@ function buildPrompt(params: {
 	active: PreparedEntry[];
 	options: EvaluatorRunOptions;
 	schema: JSONSchema;
-	/** Oldest conversation rows dropped by the input budget, if any. */
-	transcriptOmittedRows?: number;
 	/** Background history review: restored reference records and pagination state. */
 	referenceContext?: string;
 }): RenderedEvaluatorPrompt {
@@ -469,9 +373,6 @@ function buildPrompt(params: {
 	// second, plainer copy (live 2026-09-06: three copies per call, 107K tokens,
 	// the provider limit reachable as the room grows).
 	const providerConversationRendered = hasProviderConversationBlock(state);
-	const omittedNote = params.transcriptOmittedRows
-		? `${params.transcriptOmittedRows} older message(s) omitted for the post-turn evaluator input budget`
-		: "";
 	// Each shared result keeps its head up to POST_TURN_EVALUATOR_RESULT_MAX_CHARS
 	// (the outcome the evaluators read) while the complete ActionResults remain
 	// available on state for evaluator code; the in-loop evaluator keeps its
@@ -498,7 +399,7 @@ function buildPrompt(params: {
 		// A failed transcript read leaves sections on their own copies so the
 		// failure isolates per evaluator exactly as before.
 		roomTranscript: providerConversationRendered
-			? `rendered once below in Provider context under "${CONVERSATION_MESSAGES_HEADER_PREFIX}N retained)" (${omittedNote || "complete, deduped, oldest first"})`
+			? `rendered once below in Provider context under "${CONVERSATION_MESSAGES_HEADER_PREFIX}N retained)" (complete, deduped, oldest first)`
 			: params.roomTranscript === null
 				? "(unavailable this turn)"
 				: incremental
@@ -525,7 +426,7 @@ function buildPrompt(params: {
 								},
 							})),
 						)
-					: `${omittedNote ? `(${omittedNote})\n` : ""}${formatRecentMessages(params.roomTranscript)}`,
+					: formatRecentMessages(params.roomTranscript),
 	};
 	// Blocks several sections would each embed (live 2026-09-14: the room
 	// entity list appeared once per participant section) render once in the
@@ -719,81 +620,30 @@ function buildPrompt(params: {
 	};
 }
 
-type BudgetedEvaluatorPrompt = {
+/** Rejects a complete prompt that cannot fit; evidence is never trimmed to fit. */
+function assertPostTurnInputBudget(params: {
+	runtime: IAgentRuntime;
 	rendered: RenderedEvaluatorPrompt;
-	/** The (possibly trimmed) input the dispatched prompt was rendered from. */
-	promptInput: Parameters<typeof buildPrompt>[0];
-	estimatedPromptTokens: number;
-	budgetTokens: number;
-	omittedRows: number;
-	skip: boolean;
-};
-
-/**
- * Estimates the merged prompt before dispatch. Over budget, the oldest shared
- * conversation rows are dropped (newest first kept, current turn untouched)
- * and the prompt re-rendered; still over budget means the call is skipped.
- */
-function applyPostTurnInputBudget(
-	params: Parameters<typeof buildPrompt>[0] & {
-		rendered: RenderedEvaluatorPrompt;
-		/** Incremental evidence is the extraction contract; only complete-history batches trim. */
-		trimmable: boolean;
-	},
-): BudgetedEvaluatorPrompt {
-	const { rendered: initial, trimmable, ...promptInput } = params;
+	schema: JSONSchema;
+}): void {
 	const budgetTokens = positiveIntegerSetting(
-		promptInput.runtime,
+		params.runtime,
 		POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS_SETTING,
 		POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS_DEFAULT,
 	);
-	let rendered = initial;
-	let estimatedPromptTokens =
-		promptInput.active.length > 0
-			? estimatePromptTokens(rendered, promptInput.schema)
-			: 0;
-	let state = promptInput.state;
-	let roomTranscript = promptInput.roomTranscript;
-	let omittedRows = 0;
-	for (
-		let pass = 0;
-		trimmable &&
-		pass < POST_TURN_EVALUATOR_TRIM_PASSES &&
-		estimatedPromptTokens > budgetTokens;
-		pass++
-	) {
-		const dropChars = Math.ceil(
-			(estimatedPromptTokens - budgetTokens) *
-				POST_TURN_EVALUATOR_CHARS_PER_TOKEN,
+	const estimatedPromptTokens = estimatePromptTokens(
+		params.rendered,
+		params.schema,
+	);
+	if (estimatedPromptTokens > budgetTokens) {
+		throw new ElizaError(
+			"Post-turn evaluator complete input exceeds POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS; use a model and configured budget that support the complete evidence",
+			{
+				code: POST_TURN_EVALUATOR_INPUT_BUDGET_ERROR_CODE,
+				context: { estimatedPromptTokens, budgetTokens },
+			},
 		);
-		const trimmed = hasProviderConversationBlock(state)
-			? trimProviderConversation(state, dropChars)
-			: trimTranscript(roomTranscript, dropChars);
-		if (!trimmed) break;
-		if ("state" in trimmed) state = trimmed.state;
-		else roomTranscript = trimmed.roomTranscript;
-		omittedRows += trimmed.omittedRows;
-		rendered = buildPrompt({
-			...promptInput,
-			state,
-			roomTranscript,
-			transcriptOmittedRows: omittedRows,
-		});
-		estimatedPromptTokens = estimatePromptTokens(rendered, promptInput.schema);
 	}
-	return {
-		rendered,
-		promptInput: {
-			...promptInput,
-			state,
-			roomTranscript,
-			transcriptOmittedRows: omittedRows,
-		},
-		estimatedPromptTokens,
-		budgetTokens,
-		omittedRows,
-		skip: estimatedPromptTokens > budgetTokens,
-	};
 }
 
 // Schema-SPECIFIC rejection tokens: a HIGH-CONFIDENCE signal that the provider
@@ -1624,6 +1474,7 @@ export class EvaluatorService extends BaseService {
 	}> {
 		const { evaluatorId, rendered, schema } = params;
 		try {
+			assertPostTurnInputBudget({ runtime: this.runtime, rendered, schema });
 			const raw = await generateEvaluationOutput({
 				runtime: this.runtime,
 				rendered,
@@ -1640,6 +1491,12 @@ export class EvaluatorService extends BaseService {
 		} catch (error) {
 			// error-policy:J1 Evaluator execution returns an explicit failed
 			// result and emits its completion failure.
+			if (
+				error instanceof ElizaError &&
+				error.code === POST_TURN_EVALUATOR_INPUT_BUDGET_ERROR_CODE
+			) {
+				this.recordInputBudgetFailure(error);
+			}
 			const retryAt = providerRateLimitRetryAt(error);
 			const messageText =
 				error instanceof Error ? error.message : String(error);
@@ -1872,18 +1729,13 @@ export class EvaluatorService extends BaseService {
 		}
 	}
 
-	/** Logs the skipped model call and settles the post_turn trajectory step as gated. */
-	private recordInputBudgetSkip(budgeted: BudgetedEvaluatorPrompt): void {
+	/** Settles a rejected model dispatch as a failed extraction in its trajectory. */
+	private recordInputBudgetFailure(error: ElizaError): void {
 		const details = {
-			reason: POST_TURN_EVALUATOR_SKIP_REASON,
-			estimatedPromptTokens: budgeted.estimatedPromptTokens,
-			budgetTokens: budgeted.budgetTokens,
-			omittedRows: budgeted.omittedRows,
+			...error.context,
+			reason: "input_budget_exceeded",
+			code: error.code,
 		};
-		this.runtime.logger.warn(
-			{ src: "service:evaluator", agentId: this.runtime.agentId, ...details },
-			POST_TURN_EVALUATOR_SKIP_ERROR,
-		);
 		const context = getTrajectoryContext();
 		const trajectoryId = context?.trajectoryId?.trim();
 		const stepId = context?.trajectoryStepId?.trim();
@@ -1896,23 +1748,20 @@ export class EvaluatorService extends BaseService {
 					actionType: "evaluator",
 					actionName: "post_turn",
 					parameters: details,
-					success: true,
+					success: false,
 					result: {
-						success: true,
-						data: { ...details, gated: true, llmCallSkipped: true },
+						success: false,
+						error: error.message,
+						data: { ...details, llmCallSkipped: true },
 					},
 				},
 			);
-		} catch (error) {
-			// error-policy:J7 trajectory settlement is diagnostic; the skip stands.
+		} catch (diagnosticError) {
+			// error-policy:J7 trajectory diagnostics cannot replace the extraction failure.
 			this.runtime.reportError(
-				"EvaluatorService.recordInputBudgetSkip",
-				error,
-				{
-					trajectoryId,
-					stepId,
-					diagnosticOnly: true,
-				},
+				"EvaluatorService.recordInputBudgetFailure",
+				diagnosticError,
+				{ trajectoryId, stepId, diagnosticOnly: true },
 			);
 		}
 	}
@@ -2342,38 +2191,10 @@ ${JSON.stringify(references.map(evaluatorEvidenceRecord))}`
 			options,
 			schema,
 		};
-		// The merged prompt is estimated before dispatch: a complete-history batch
-		// over budget drops its oldest shared conversation rows, incremental
-		// evidence never trims, and a prompt still over budget skips the call.
-		const budgeted =
-			freshEntries.length > 0
-				? applyPostTurnInputBudget({
-						...promptInput,
-						rendered: buildPrompt(promptInput),
-						trimmable: progress === undefined,
-					})
-				: null;
-		if (budgeted?.skip) {
-			this.recordInputBudgetSkip(budgeted);
-			if (
-				preparedEntries.every(
-					(entry) =>
-						entry.progress?.pendingOutput === undefined &&
-						entry.resolvedOutput === undefined,
-				)
-			) {
-				return this.skippedResult({
-					activeEvaluators: preparedEntries.map(
-						({ evaluator }) => evaluator.name,
-					),
-					errors,
-				});
-			}
-		}
-		// The (possibly trimmed) input the dispatched prompt renders from; the
-		// JSON-object and plain fallbacks re-render it with the schema spelled out.
-		let dispatchInput = budgeted?.promptInput ?? promptInput;
-		let rendered = budgeted && !budgeted.skip ? budgeted.rendered : null;
+		// Keep complete evidence through initial and restored-context dispatches;
+		// the model boundary rejects oversized prompts as explicit failures.
+		let dispatchInput = promptInput;
+		let rendered = freshEntries.length > 0 ? buildPrompt(promptInput) : null;
 
 		const evaluatorId =
 			uuidv4() as `${string}-${string}-${string}-${string}-${string}`;
@@ -2395,15 +2216,9 @@ ${JSON.stringify(references.map(evaluatorEvidenceRecord))}`
 
 		const readOutput = (prompt: RenderedEvaluatorPrompt) =>
 			this.readEvaluatorOutput({ evaluatorId, rendered: prompt, schema });
-		let { output, error, retryAt } = budgeted?.skip
-			? {
-					output: null,
-					error: POST_TURN_EVALUATOR_SKIP_ERROR,
-					retryAt: undefined,
-				}
-			: rendered
-				? await readOutput(rendered)
-				: { output: {}, error: undefined, retryAt: undefined };
+		let { output, error, retryAt } = rendered
+			? await readOutput(rendered)
+			: { output: {}, error: undefined, retryAt: undefined };
 
 		while (
 			background &&

@@ -405,6 +405,98 @@ describe("durable background memory", () => {
 		},
 	);
 
+	it("keeps an oversized complete background evidence record durable until capacity is fixed", async () => {
+		const { runtime, service, message } = await setup();
+		await runtime.updateMemory({
+			id: message.id,
+			content: { text: "Complete pending evidence ".repeat(4_000) },
+		});
+		const processor = vi.fn(async () => undefined);
+		runtime.registerEvaluator(evaluator(processor));
+		let inputBudget = 3_000;
+		vi.spyOn(runtime, "getSetting").mockImplementation((key) =>
+			key === "POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS"
+				? String(inputBudget)
+				: key === "MEMORY_EVIDENCE_BATCH_BYTES"
+					? "200000"
+					: null,
+		);
+		runtime.useModel = vi.fn(
+			async () => '{"memory":{"ok":true}}',
+		) as AgentRuntime["useModel"];
+		await service.enqueue(message, state, { phase: "post_turn" });
+		const task = await job(runtime);
+		await expect(execute(runtime, task)).rejects.toMatchObject({
+			code: "EVALUATOR_JOB_PENDING",
+		});
+		expect(runtime.useModel).not.toHaveBeenCalled();
+		expect(processor).not.toHaveBeenCalled();
+		expect(await runtime.getTask(task.id)).not.toBeNull();
+		expect((await runtime.getMemoryById(message.id))?.content.text).toBe(
+			"Complete pending evidence ".repeat(4_000),
+		);
+		inputBudget = 120_000;
+		await execute(runtime, task);
+		expect(processor).toHaveBeenCalledTimes(1);
+		expect(await runtime.getTask(task.id)).toBeNull();
+	});
+
+	it("rejects oversized restored reference context before a second dispatch or new effects", async () => {
+		const { runtime, service, message } = await setup();
+		const earlier = {
+			...message,
+			id: stringToUuid("budget-reference"),
+			createdAt: 1,
+			content: { text: "Complete authored reference ".repeat(3_000) },
+		};
+		await runtime.upsertMemory(earlier, "messages");
+		const stored = await runtime.getMemories({
+			tableName: "messages",
+			roomId: message.roomId,
+			unique: false,
+			includeEmbedding: false,
+			orderDirection: "asc",
+		});
+		const batchBytes =
+			Math.max(
+				...stored.map(
+					(row) => new TextEncoder().encode(JSON.stringify(row)).byteLength,
+				),
+			) + 1;
+		const processor = vi.fn(async () => undefined);
+		runtime.registerEvaluator(evaluator(processor));
+		let inputBudget = 120_000;
+		vi.spyOn(runtime, "getSetting").mockImplementation((key) =>
+			key === "POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS"
+				? String(inputBudget)
+				: key === "MEMORY_EVIDENCE_BATCH_BYTES"
+					? String(batchBytes)
+					: null,
+		);
+		let calls = 0;
+		runtime.useModel = vi.fn(async () =>
+			++calls === 1
+				? '{"memory":{"ok":true}}'
+				: JSON.stringify({
+						restoreContextBefore: message.id,
+						memory: { ok: false },
+					}),
+		) as AgentRuntime["useModel"];
+		await service.enqueue(message, state, { phase: "post_turn" });
+		const task = await job(runtime);
+		await execute(runtime, task);
+		inputBudget = 3_000;
+		await expect(execute(runtime, task)).rejects.toMatchObject({
+			code: "EVALUATOR_JOB_PENDING",
+		});
+		expect(runtime.useModel).toHaveBeenCalledTimes(2);
+		expect(processor).toHaveBeenCalledTimes(1);
+		expect(await runtime.getTask(task.id)).not.toBeNull();
+		expect(runtime.getRecentReportedErrors()).toContainEqual(
+			expect.objectContaining({ code: "EVALUATOR_INPUT_BUDGET_EXCEEDED" }),
+		);
+	});
+
 	it("keeps scheduler backoff when delivery re-enqueues a rate-limited memory job", async () => {
 		const { runtime, service, message } = await setup();
 		if (!message.id) throw new Error("Persisted source identity required");

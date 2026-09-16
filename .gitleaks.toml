@@ -374,3 +374,17 @@ regexTarget = "line"
 regexes = [
   '''^\s*(?:process\.env\.STRIPE_SECRET_KEY\s*=\s*|STRIPE_SECRET_KEY:\s*)"(?:sk_test_cancellationfixture|sk_test_renewalfixture|sk_test_terminalfixture|sk_test_validfixture)"[;,]?\s*$''',
 ]
+
+# Calendar mutation tests use a deterministic idempotency identifier. Allow
+# only this complete assignment in its test path; other values remain scanned.
+[[allowlists]]
+description = "Calendar mutation synthetic idempotency identifier"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''(^|/)plugins/plugin-calendar/test/eliza-calendar\.pglite\.test\.ts$''',
+]
+regexTarget = "line"
+regexes = [
+  '''^\s*idempotencyKey:\s*"notary-gate-180",?\s*$''',
+]

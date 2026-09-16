@@ -384,8 +384,9 @@ describe("built-in Eliza calendar (real PGlite)", { timeout: 30_000 }, () => {
     expect(result?.userFacingText).toBe(
       "Moved “Notary appointment” to Friday, Sep 18 at 4pm EDT.",
     );
+    if (!result) throw new Error("Calendar move returned no action result");
     const moved = (
-      result?.data as { event?: { startAt: string; endAt: string } }
+      result.data as { event?: { startAt: string; endAt: string } }
     ).event;
     expect(moved).toMatchObject({
       startAt: "2026-09-18T20:00:00.000Z",
@@ -432,8 +433,9 @@ describe("built-in Eliza calendar (real PGlite)", { timeout: 30_000 }, () => {
       },
     );
     expect(result?.success, JSON.stringify(result)).toBe(true);
+    if (!result) throw new Error("Calendar create returned no action result");
     const created = (
-      result?.data as {
+      result.data as {
         event?: { attendees: unknown[]; startAt: string; endAt: string };
       }
     ).event;

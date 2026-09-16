@@ -1,23 +1,20 @@
 /**
- * Pre-dispatch input budget for the merged post-turn evaluator call. Under
- * POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS the prompt is dispatched unchanged;
- * over it the oldest RECENT_MESSAGES rows are dropped (newest kept) until it
- * fits; an untrimmable prompt skips the call, settles the trajectory step as
- * gated and never throws (live 2026-09-13: 137,434 and 151,523 prompt tokens
- * against a 131,072-token window).
+ * Complete post-turn input admission through the real runtime and in-memory
+ * adapter with controlled provider/model responses. Oversized evidence fails
+ * before inference, remains intact, and produces failed diagnostic artifacts.
  */
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryDatabaseAdapter } from "../database/inMemoryAdapter";
+import { ElizaError } from "../errors";
 import { AgentRuntime } from "../runtime";
 import { estimateModelInputTokens } from "../runtime/model-input-budget";
 import { runWithTrajectoryContext } from "../trajectory-context";
-import type { Character, Memory, Service } from "../types";
+import { type Character, EventType, type Memory, type Service } from "../types";
 import { conversationMessagesHeader } from "../utils";
 import { EvaluatorService } from "./evaluator";
 
 const BUDGET_TOKENS = 3_000;
 const ENTITY_ID = "00000000-0000-0000-0000-000000000002";
-const OMISSION_NOTE = "omitted for the post-turn evaluator input budget";
 
 function makeRuntime(): AgentRuntime {
 	const runtime = new AgentRuntime({
@@ -114,40 +111,103 @@ describe("post-turn evaluator input budget", () => {
 		expect(result.processedEvaluators).toEqual(["alpha"]);
 		expect(result.errors).toEqual([]);
 		expect(prompts[0]).toContain(block);
-		expect(prompts[0]).not.toContain(OMISSION_NOTE);
 	});
 
-	it("drops the oldest conversation rows until the prompt fits, then dispatches", async () => {
+	it("rejects oversized provider history without dropping its oldest evidence", async () => {
 		const runtime = makeRuntime();
 		const prompts = captureModel(runtime);
+		const process = vi.spyOn(runtime.evaluators[0].processors[0], "process");
 		const state = stateWithBlock(conversationBlock(400));
+		const original = structuredClone(state);
 		expect(promptTokens(state.text)).toBeGreaterThan(BUDGET_TOKENS);
-
 		const result = await new EvaluatorService(runtime).run(
 			makeMessage(),
 			state,
 		);
-
-		expect(runtime.useModel).toHaveBeenCalledTimes(1);
-		expect(result.skipped).toBe(false);
-		expect(result.processedEvaluators).toEqual(["alpha"]);
-		expect(result.errors).toEqual([]);
-		const prompt = prompts[0] ?? "";
-		expect(promptTokens(prompt)).toBeLessThanOrEqual(BUDGET_TOKENS);
-		expect(prompt).toContain("Nubs: row 399 ");
-		expect(prompt).not.toContain("Nubs: row 0 ");
-		expect(prompt).toMatch(
-			/\[\d+ older message\(s\) omitted for the post-turn evaluator input budget\]/,
-		);
-		expect(prompt).toContain("# Received Message\nNubs: hello");
-		expect(prompt.split(conversationMessagesHeader(400))).toHaveLength(2);
-		expect(prompt).toContain("Latest message:\nhello");
+		expect(prompts).toEqual([]);
+		expect(process).not.toHaveBeenCalled();
+		expect(result).toMatchObject({
+			skipped: false,
+			processedEvaluators: [],
+			results: [],
+		});
+		expect(result.errors).toEqual([
+			expect.objectContaining({
+				evaluatorName: "post_turn",
+				error: expect.stringContaining("complete input exceeds"),
+			}),
+		]);
+		expect(state).toEqual(original);
+		expect(state.text).toContain("Nubs: row 0 ");
+		expect(state.text).toContain("Nubs: row 399 ");
 	});
 
-	it("skips the call, settles the step as gated and returns skipped when nothing can be trimmed", async () => {
+	it("retains stored transcript records when the complete transcript exceeds admission", async () => {
 		const runtime = makeRuntime();
 		const prompts = captureModel(runtime);
-		const warn = vi.spyOn(runtime.logger, "warn");
+		const message = {
+			...makeMessage(),
+			agentId: runtime.agentId,
+			createdAt: 2,
+		};
+		const earlier = {
+			...message,
+			id: ENTITY_ID,
+			createdAt: 1,
+			content: {
+				text: `Standing constraint: ${"full evidence ".repeat(4_000)}`,
+				source: "test",
+			},
+		};
+		await runtime.upsertMemory(earlier, "messages");
+		await runtime.upsertMemory(message, "messages");
+		const result = await new EvaluatorService(runtime).run(message);
+		expect(prompts).toEqual([]);
+		expect(result.skipped).toBe(false);
+		expect(result.errors.length).toBeGreaterThan(0);
+		expect((await runtime.getMemoryById(earlier.id))?.content).toEqual(
+			earlier.content,
+		);
+		expect((await runtime.getMemoryById(message.id))?.content).toEqual(
+			message.content,
+		);
+	});
+
+	it("still processes independently resolved output when fresh model input is oversized", async () => {
+		const runtime = makeRuntime();
+		captureModel(runtime);
+		const process = vi.fn(async () => ({ success: true }));
+		runtime.registerEvaluator({
+			name: "captured",
+			description: "Already captured",
+			shouldRun: async () => true,
+			schema: {
+				type: "object",
+				properties: { ok: { type: "boolean" } },
+				required: ["ok"],
+			},
+			resolveOutput: () => ({ ok: true }),
+			processors: [{ process }],
+		});
+		const result = await new EvaluatorService(runtime).run(
+			makeMessage(),
+			stateWithBlock(conversationBlock(400)),
+		);
+		expect(runtime.useModel).not.toHaveBeenCalled();
+		expect(process).toHaveBeenCalledTimes(1);
+		expect(result.processedEvaluators).toEqual(["captured"]);
+		expect(result.errors).toContainEqual(
+			expect.objectContaining({
+				evaluatorName: "post_turn",
+				error: expect.stringContaining("complete input exceeds"),
+			}),
+		);
+	});
+
+	it("reports oversized notes as a typed failure and settles the trajectory as failed", async () => {
+		const runtime = makeRuntime();
+		const prompts = captureModel(runtime);
+		const report = vi.spyOn(runtime, "reportError");
 		const trajectories = {
 			isEnabled: () => true,
 			startStep: vi.fn(() => "child-step"),
@@ -175,18 +235,40 @@ describe("post-turn evaluator input budget", () => {
 		expect(prompts).toEqual([]);
 		expect(runtime.useModel).not.toHaveBeenCalled();
 		expect(result).toMatchObject({
-			skipped: true,
+			skipped: false,
 			activeEvaluators: ["alpha"],
 			processedEvaluators: [],
-			errors: [],
+			errors: [
+				expect.objectContaining({
+					evaluatorName: "post_turn",
+					error: expect.stringContaining("complete input exceeds"),
+				}),
+			],
 		});
-		expect(warn).toHaveBeenCalledWith(
+		expect(report).toHaveBeenCalledWith(
+			"EvaluatorService.evaluate",
+			expect.any(ElizaError),
+			expect.objectContaining({ evaluatorId: expect.any(String) }),
+		);
+		expect(runtime.getRecentReportedErrors()).toContainEqual(
 			expect.objectContaining({
-				src: "service:evaluator",
-				reason: "input_budget_exceeded",
-				budgetTokens: BUDGET_TOKENS,
+				code: "EVALUATOR_INPUT_BUDGET_EXCEEDED",
+				context: expect.objectContaining({
+					budgetTokens: BUDGET_TOKENS,
+					estimatedPromptTokens: expect.any(Number),
+				}),
 			}),
-			expect.stringContaining("POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS"),
+		);
+		expect(runtime.emitEvent).toHaveBeenCalledWith(
+			EventType.ERROR_REPORTED,
+			expect.objectContaining({ code: "EVALUATOR_INPUT_BUDGET_EXCEEDED" }),
+		);
+		expect(runtime.emitEvent).toHaveBeenCalledWith(
+			EventType.EVALUATOR_COMPLETED,
+			expect.objectContaining({
+				completed: false,
+				error: expect.any(ElizaError),
+			}),
 		);
 		expect(trajectories.completeStep).toHaveBeenCalledWith(
 			"traj-1",
@@ -194,9 +276,11 @@ describe("post-turn evaluator input budget", () => {
 			expect.objectContaining({
 				actionType: "evaluator",
 				actionName: "post_turn",
+				success: false,
 				result: expect.objectContaining({
+					success: false,
 					data: expect.objectContaining({
-						gated: true,
+						budgetTokens: BUDGET_TOKENS,
 						llmCallSkipped: true,
 						reason: "input_budget_exceeded",
 					}),
