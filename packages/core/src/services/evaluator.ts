@@ -184,30 +184,6 @@ const POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS_SETTING =
 const POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS_DEFAULT = 60_000;
 const POST_TURN_EVALUATOR_INPUT_BUDGET_ERROR_CODE =
 	"EVALUATOR_INPUT_BUDGET_EXCEEDED";
-/**
- * Opt-in per-result cap for the post-turn prompt. Unset keeps the complete
- * result projections (the lossless contract); a deployment on a small
- * context window sets it (live 2026-09-14: one WEB_FETCH result rendered
- * 45K chars into a 29.6K-token post-turn call).
- */
-const POST_TURN_EVALUATOR_RESULT_MAX_CHARS_SETTING =
-	"POST_TURN_EVALUATOR_RESULT_MAX_CHARS";
-function optionalPositiveIntegerSetting(
-	runtime: IAgentRuntime,
-	key: string,
-): number | undefined {
-	const value = runtime.getSetting(key);
-	const parsed =
-		typeof value === "number"
-			? value
-			: typeof value === "string"
-				? Number.parseInt(value, 10)
-				: Number.NaN;
-	return Number.isFinite(parsed) && parsed >= 1
-		? Math.floor(parsed)
-		: undefined;
-}
-
 function positiveIntegerSetting(
 	runtime: IAgentRuntime,
 	key: string,
@@ -373,14 +349,6 @@ function buildPrompt(params: {
 	// second, plainer copy (live 2026-09-06: three copies per call, 107K tokens,
 	// the provider limit reachable as the room grows).
 	const providerConversationRendered = hasProviderConversationBlock(state);
-	// Each shared result keeps its head up to POST_TURN_EVALUATOR_RESULT_MAX_CHARS
-	// (the outcome the evaluators read) while the complete ActionResults remain
-	// available on state for evaluator code; the in-loop evaluator keeps its
-	// complete projections.
-	const actionResultsMaxChars = optionalPositiveIntegerSetting(
-		runtime,
-		POST_TURN_EVALUATOR_RESULT_MAX_CHARS_SETTING,
-	);
 	const sharedParts = {
 		referenceContext: params.referenceContext ?? "",
 		evidenceMode: incremental
@@ -389,9 +357,7 @@ function buildPrompt(params: {
 		latestMessage,
 		responseTexts,
 		actionResults: Array.isArray(actionResults)
-			? renderActionResultsForModel(actionResults as ActionResult[], {
-					maxCharsPerResult: actionResultsMaxChars,
-				}).text
+			? renderActionResultsForModel(actionResults as ActionResult[]).text
 			: stringifyForPrompt(actionResults ?? []),
 		providerContext,
 		// Rendered once here; sections refer to it instead of embedding their
@@ -452,7 +418,6 @@ function buildPrompt(params: {
 		roomTranscriptRendered:
 			providerConversationRendered || params.roomTranscript !== null,
 		actionResultsText: sharedParts.actionResults,
-		actionResultsMaxChars,
 		blocks: sharedBlocks,
 	};
 

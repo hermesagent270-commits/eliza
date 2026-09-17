@@ -1839,10 +1839,8 @@ function renderSuccessPromptSegments({
 	options: EvaluatorRunOptions;
 	shared?: EvaluatorSharedPromptContext;
 }): PromptSegment[] {
-	// Rendered with the shared cap so a capped shared copy still matches.
 	const actionResultsText = renderActionResultsForModel(
 		prepared.actionResults,
-		{ maxCharsPerResult: shared?.actionResultsMaxChars },
 	).text;
 	const actionResultsSection =
 		shared?.actionResultsText === actionResultsText

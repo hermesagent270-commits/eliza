@@ -173,6 +173,48 @@ describe("post-turn evaluator input budget", () => {
 		);
 	});
 
+	it("rejects a complete oversized tool result despite a legacy prefix cap", async () => {
+		const runtime = makeRuntime();
+		runtime.setSetting("POST_TURN_EVALUATOR_RESULT_MAX_CHARS", "400");
+		const prompts = captureModel(runtime);
+		const process = vi.spyOn(runtime.evaluators[0].processors[0], "process");
+		const state = {
+			values: {},
+			data: {
+				actionResults: [
+					{
+						success: true,
+						data: {
+							actionName: "MEMORY",
+							evidence: "complete evidence ".repeat(4_000),
+							tail: "Do not treat the earlier mutation as committed.",
+						},
+					},
+				],
+			},
+			text: "",
+		};
+		const original = structuredClone(state);
+		const result = await new EvaluatorService(runtime).run(
+			makeMessage(),
+			state,
+		);
+		expect(prompts).toEqual([]);
+		expect(process).not.toHaveBeenCalled();
+		expect(result.errors).toContainEqual(
+			expect.objectContaining({
+				evaluatorName: "post_turn",
+				error: expect.stringContaining("complete input exceeds"),
+			}),
+		);
+		expect(runtime.getRecentReportedErrors()).toContainEqual(
+			expect.objectContaining({
+				code: "EVALUATOR_INPUT_BUDGET_EXCEEDED",
+			}),
+		);
+		expect(state).toEqual(original);
+	});
+
 	it("still processes independently resolved output when fresh model input is oversized", async () => {
 		const runtime = makeRuntime();
 		captureModel(runtime);

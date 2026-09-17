@@ -3,9 +3,8 @@
  * request carries the merged schema structurally and renders only a compact
  * outline in the prompt; the JSON-object / plain fallbacks spell the schema
  * out. Blocks two sections declare render once in the shared context, and each
- * shared action result keeps its head up to POST_TURN_EVALUATOR_RESULT_MAX_CHARS
- * (live 2026-09-14: 19,449 prompt tokens per call, 40% of them the schema
- * text, one 7.6K-char MEMORY result, the room entity list rendered twice).
+ * shared action result remains complete. The real runtime uses an in-memory
+ * adapter and controlled model responses to inspect the dispatched prompt.
  */
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryDatabaseAdapter } from "../database/inMemoryAdapter";
@@ -267,7 +266,7 @@ describe("post-turn evaluator prompt size", () => {
 		).toHaveLength(3);
 	});
 
-	it("caps each shared action result at POST_TURN_EVALUATOR_RESULT_MAX_CHARS and keeps the success section on the shared copy", async () => {
+	it("keeps every receipt and the result tail despite a legacy result-cap setting", async () => {
 		const runtime = makeRuntime({
 			POST_TURN_EVALUATOR_RESULT_MAX_CHARS: "400",
 		});
@@ -300,21 +299,17 @@ describe("post-turn evaluator prompt size", () => {
 		expect(result.errors).toEqual([]);
 		const prompt = calls[0]?.prompt ?? "";
 		const complete = renderActionResultsForModel(actionResults).text;
-		const capped = renderActionResultsForModel(actionResults, {
-			maxCharsPerResult: 400,
-		}).text;
 		expect(complete.length).toBeGreaterThan(4_000);
-		expect(capped.length).toBeLessThan(600);
-		expect(prompt).toContain(capped);
-		expect(prompt).not.toContain("TAIL-MARKER");
-		expect(prompt).toMatch(/\[truncated: \d+ of \d+ chars omitted\]/);
+		expect(prompt).toContain(complete);
+		expect(prompt).toContain("TAIL-MARKER");
+		expect(prompt).not.toContain("[truncated:");
 		expect(prompt.split("1. MEMORY - succeeded")).toHaveLength(2);
 		expect(prompt).toContain(
 			'Action results: see "Action results" in the Shared Turn Context above.',
 		);
 	});
 
-	it("keeps short action results complete under the default cap", async () => {
+	it("keeps failed action results complete", async () => {
 		const runtime = makeRuntime();
 		runtime.registerEvaluator(section("alpha"));
 		const actionResults: ActionResult[] = [
