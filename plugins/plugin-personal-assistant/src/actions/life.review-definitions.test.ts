@@ -12,6 +12,7 @@ import type {
 } from "@elizaos/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  LifeOpsCadence,
   LifeOpsDefinitionRecord,
   LifeOpsDefinitionStatus,
   LifeOpsDomain,
@@ -100,8 +101,11 @@ function definitionRecord(args: {
   ownerSurface?: string;
   status?: LifeOpsDefinitionStatus;
   title: string;
+  cadence?: LifeOpsCadence;
+  timezone?: string;
 }): LifeOpsDefinitionRecord {
   const now = "2026-08-15T00:00:00.000Z";
+  const timezone = args.timezone ?? "UTC";
   const definition = {
     id: args.id,
     agentId: "00000000-0000-0000-0000-000000000003",
@@ -114,11 +118,11 @@ function definitionRecord(args: {
     title: args.title,
     description: "",
     originalIntent: args.title,
-    timezone: "UTC",
+    timezone,
     status: args.status ?? "active",
     priority: 5,
-    cadence: { kind: "unscheduled" },
-    windowPolicy: { timezone: "UTC", windows: [] },
+    cadence: args.cadence ?? { kind: "unscheduled" },
+    windowPolicy: { timezone, windows: [] },
     progressionRule: { kind: "manual" },
     checkInPolicy: null,
     websiteAccess: null,
@@ -293,6 +297,31 @@ describe("LifeOps definition review isolation", () => {
       }
     },
   );
+
+  it("renders one-time cadence in the stored definition timezone", async () => {
+    serviceState.definitions = [
+      definitionRecord({
+        id: "reminder-owner-9am",
+        kind: "task",
+        metadata: {
+          nativeAppleReminder: {
+            kind: "reminder",
+            provider: "apple_reminders",
+            source: "heuristic",
+          },
+        },
+        title: "Call dentist",
+        cadence: { kind: "once", dueAt: "2026-08-20T16:00:00.000Z" },
+        timezone: "America/Los_Angeles",
+      }),
+    ];
+
+    const result = await review({ ownerSurface: "OWNER_REMINDERS" });
+
+    expect(result.success).toBe(true);
+    expect(result.text).toContain("once on Aug 20, 9:00 AM");
+    expect(result.text).not.toContain("once on Aug 20, 4:00 PM");
+  });
 
   it("applies the requested domain before rendering or returning definitions", async () => {
     const result = await review({

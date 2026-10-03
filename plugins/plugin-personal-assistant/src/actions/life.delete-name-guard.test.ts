@@ -16,6 +16,7 @@ import type {
 } from "@elizaos/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  LifeOpsCadence,
   LifeOpsDefinitionRecord,
   LifeOpsTaskDefinition,
 } from "../contracts/index.js";
@@ -91,8 +92,13 @@ const PERFORMANCE = {
   },
 };
 
-function reminderRecord(id: string, title: string): LifeOpsDefinitionRecord {
+function reminderRecord(
+  id: string,
+  title: string,
+  options: { cadence?: LifeOpsCadence; timezone?: string } = {},
+): LifeOpsDefinitionRecord {
   const now = "2026-08-15T00:00:00.000Z";
+  const timezone = options.timezone ?? "UTC";
   const definition = {
     id,
     agentId: "00000000-0000-0000-0000-000000000003",
@@ -105,11 +111,11 @@ function reminderRecord(id: string, title: string): LifeOpsDefinitionRecord {
     title,
     description: "",
     originalIntent: title,
-    timezone: "UTC",
+    timezone,
     status: "active",
     priority: 5,
-    cadence: { kind: "unscheduled" },
-    windowPolicy: { timezone: "UTC", windows: [] },
+    cadence: options.cadence ?? { kind: "unscheduled" },
+    windowPolicy: { timezone, windows: [] },
     progressionRule: { kind: "manual" },
     checkInPolicy: null,
     websiteAccess: null,
@@ -186,5 +192,26 @@ describe("destructive definition resolution — wrong-item guard", () => {
     );
     expect(result.success).toBe(true);
     expect(serviceState.deletedIds).toEqual(["r-kettle"]);
+  });
+
+  it("uses owner-local clock hints to select an exact-title duplicate", async () => {
+    serviceState.definitions = [
+      reminderRecord("owner-9am", "Call dentist", {
+        cadence: { kind: "once", dueAt: "2026-08-20T16:00:00.000Z" },
+        timezone: "America/Los_Angeles",
+      }),
+      reminderRecord("owner-4pm", "Call dentist", {
+        cadence: { kind: "once", dueAt: "2026-08-20T23:00:00.000Z" },
+        timezone: "America/Los_Angeles",
+      }),
+    ];
+
+    const result = await requestDelete(
+      "Call dentist",
+      "delete the Call dentist reminder at 4pm",
+    );
+
+    expect(result.success).toBe(true);
+    expect(serviceState.deletedIds).toEqual(["owner-4pm"]);
   });
 });

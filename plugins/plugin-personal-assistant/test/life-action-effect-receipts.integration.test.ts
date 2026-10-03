@@ -128,6 +128,81 @@ afterAll(async () => {
 });
 
 describe("owner life action effect receipts — real PGlite", () => {
+  it("uses owner-local clock hints to delete the intended duplicate reminder", async () => {
+    const service = new LifeOpsService(runtime, {
+      ownerEntityId: runtime.agentId,
+    });
+    const title = "Timezone evidence check";
+    const ownership = {
+      domain: "user_lifeops" as const,
+      subjectType: "owner" as const,
+      subjectId: runtime.agentId,
+    };
+    const morning = await service.createDefinition({
+      kind: "task",
+      title,
+      ownership,
+      timezone: "America/Los_Angeles",
+      cadence: { kind: "once", dueAt: "2026-08-20T16:00:00.000Z" },
+      metadata: { ownerSurface: "OWNER_REMINDERS" },
+    });
+    const afternoon = await service.createDefinition({
+      kind: "task",
+      title,
+      ownership,
+      timezone: "America/Los_Angeles",
+      cadence: { kind: "once", dueAt: "2026-08-20T23:00:00.000Z" },
+      metadata: { ownerSurface: "OWNER_REMINDERS" },
+    });
+    expect(
+      (await service.listDefinitions())
+        .filter((record) => record.definition.title === title)
+        .map((record) => ({
+          id: record.definition.id,
+          subjectId: record.definition.subjectId,
+          subjectType: record.definition.subjectType,
+        })),
+    ).toEqual([
+      {
+        id: morning.definition.id,
+        subjectId: runtime.agentId,
+        subjectType: "owner",
+      },
+      {
+        id: afternoon.definition.id,
+        subjectId: runtime.agentId,
+        subjectType: "owner",
+      },
+    ]);
+
+    const deleted = await invoke(
+      {
+        action: "delete",
+        kind: "definition",
+        intent: `Delete the ${title} reminder at 4pm`,
+        ownerSurface: "OWNER_REMINDERS",
+        target: title,
+      },
+      `Delete the ${title} reminder at 4pm`,
+    );
+
+    expect(deleted.result.success, JSON.stringify(deleted.result)).toBe(true);
+    expect(receipt(deleted.result)).toMatchObject({
+      outcome: "applied",
+      operation: "lifeops.definition.delete",
+      resource: { id: afternoon.definition.id },
+    });
+    await expect(
+      service.repository.getDefinition(runtime.agentId, morning.definition.id),
+    ).resolves.toMatchObject({ id: morning.definition.id });
+    await expect(
+      service.repository.getDefinition(
+        runtime.agentId,
+        afternoon.definition.id,
+      ),
+    ).resolves.toBeNull();
+  }, 120_000);
+
   it("delivers strict receipts through the canonical action executor", async () => {
     const callback = vi.fn<HandlerCallback>(async () => []);
     const message = {
