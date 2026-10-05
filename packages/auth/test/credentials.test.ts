@@ -308,12 +308,28 @@ describe("credentials — domain scoping", () => {
       expect(login?.password).toBe("us-password");
     }
 
+    await setSavedLogin(test.vault, {
+      domain: "co.uk",
+      username: "bob.smith",
+      password: "co-uk-password",
+    });
+    await setSavedLogin(test.vault, {
+      domain: "example.co.uk",
+      username: "carol",
+      password: "example-password",
+    });
+    expect(await listSavedLogins(test.vault, "co.uk")).toMatchObject([
+      { domain: "co.uk", username: "bob.smith" },
+    ]);
+
     const all = await listSavedLogins(test.vault);
     expect(
       all.map(({ domain, username }) => `${domain}/${username}`).sort(),
     ).toEqual([
       "amazon.com.au/alice@example.com",
       "amazon.com/alice@example.com",
+      "co.uk/bob.smith",
+      "example.co.uk/carol",
     ]);
   });
 });
