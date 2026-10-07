@@ -164,6 +164,20 @@ export function parseJsonArrayFromText(text: string): JsonValue[] | null {
 	return null;
 }
 
+function trailingParenIsWrapping(clean: string): boolean {
+	let depth = 0;
+	for (let i = clean.length - 1; i >= 0; i--) {
+		const char = clean[i];
+		if (char === ")") {
+			depth++;
+		} else if (char === "(") {
+			depth--;
+			if (depth === 0) return false;
+		}
+	}
+	return depth > 0;
+}
+
 export function cleanUrl(url: string): string {
 	let clean = url;
 
@@ -187,12 +201,11 @@ export function cleanUrl(url: string): string {
 			/[（）［］【】｛｝《》〈〉「」『』、。，．；：！？~～]+$/,
 			"",
 		);
-		// A trailing ")" is wrapping syntax only when it has no "(" to close:
-		// Wikipedia-style paths such as /wiki/Mercury_(planet) end in one.
-		if (
-			clean.endsWith(")") &&
-			clean.split(")").length > clean.split("(").length
-		) {
+		// A trailing ")" is wrapping syntax only when it does not close an
+		// earlier "(". A global tally cuts ?q=a)b_(c) because the unmatched
+		// ")" before b makes closers more numerous, even though the final ")"
+		// belongs to the "(" before c.
+		if (clean.endsWith(")") && trailingParenIsWrapping(clean)) {
 			clean = clean.slice(0, -1);
 		}
 	}
