@@ -2922,6 +2922,11 @@ function parseMessageSearchTime(
   const parsed = Date.parse(trimmed);
   return Number.isNaN(parsed) ? "invalid" : parsed;
 }
+/** Moves a UTF-16 cut back one unit so it never splits a surrogate pair. */
+function codePointBoundary(text: string, index: number): number {
+  const code = text.charCodeAt(index);
+  return index > 0 && code >= 0xdc00 && code <= 0xdfff ? index - 1 : index;
+}
 /** A `…keyword…` excerpt around the first match, or a head-truncated fallback. */
 function buildMessageSearchSnippet(text: string, query: string): string {
   const normalizedText = text.replace(/\s+/g, " ").trim();
@@ -2930,12 +2935,18 @@ function buildMessageSearchSnippet(text: string, query: string): string {
   if (index < 0) {
     return normalizedText.length <= MESSAGE_SEARCH_SNIPPET_RADIUS * 2
       ? normalizedText
-      : `${normalizedText.slice(0, MESSAGE_SEARCH_SNIPPET_RADIUS * 2).trimEnd()}...`;
+      : `${normalizedText.slice(0, codePointBoundary(normalizedText, MESSAGE_SEARCH_SNIPPET_RADIUS * 2)).trimEnd()}...`;
   }
-  const start = Math.max(0, index - MESSAGE_SEARCH_SNIPPET_RADIUS);
-  const end = Math.min(
-    normalizedText.length,
-    index + query.length + MESSAGE_SEARCH_SNIPPET_RADIUS,
+  const start = codePointBoundary(
+    normalizedText,
+    Math.max(0, index - MESSAGE_SEARCH_SNIPPET_RADIUS),
+  );
+  const end = codePointBoundary(
+    normalizedText,
+    Math.min(
+      normalizedText.length,
+      index + query.length + MESSAGE_SEARCH_SNIPPET_RADIUS,
+    ),
   );
   const prefix = start > 0 ? "..." : "";
   const suffix = end < normalizedText.length ? "..." : "";
@@ -3105,7 +3116,7 @@ async function searchConversationMessages(
 ): Promise<boolean> {
   const { req, res, json, error, state, requestUrl } = ctx;
   if (!state.runtime) {
-    json(res, { results: [], count: 0 });
+    error(res, "Agent runtime not available", 503);
     return true;
   }
   const query = normalizeMessageSearchQuery(requestUrl.searchParams.get("q"));
