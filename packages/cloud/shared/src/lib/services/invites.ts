@@ -6,6 +6,7 @@ import {
   type NewOrganizationInvite,
   type OrganizationInvite,
   organizationInvitesRepository,
+  usersRepository,
 } from "../../db/repositories";
 import { agentSandboxesRepository } from "../../db/repositories/agent-sandboxes";
 import { appsRepository } from "../../db/repositories/apps";
@@ -211,11 +212,29 @@ export class InvitesService {
         updated_at: new Date(),
       });
     } catch (error) {
-      await organizationInvitesRepository.restorePending(invite.id);
+      let currentUser: Awaited<ReturnType<typeof usersRepository.findByIdForWrite>>;
+      try {
+        currentUser = await usersRepository.findByIdForWrite(userId);
+      } catch (observationError) {
+        // The user update can commit before a later authorization-fence or
+        // cache operation fails. Keep the invite claimed when the primary
+        // membership outcome cannot be observed; reopening it would permit a
+        // second accept or revoke after the user may already have moved.
+        throw new AggregateError(
+          [error, observationError],
+          "Invite acceptance failed and the membership outcome could not be verified",
+        );
+      }
+      if (
+        !currentUser ||
+        (currentUser.organization_id === user.organization_id && currentUser.role === user.role)
+      ) {
+        await organizationInvitesRepository.releaseAcceptance(invite.id, userId);
+      }
       throw error;
     }
     if (!movedUser) {
-      await organizationInvitesRepository.restorePending(invite.id);
+      await organizationInvitesRepository.releaseAcceptance(invite.id, userId);
       throw new Error("Failed to move user into invited organization");
     }
 

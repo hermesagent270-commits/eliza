@@ -170,15 +170,28 @@ export class OrganizationInvitesRepository {
     });
   }
 
-  /**
-   * Returns an accepted invite to pending when the accept could not finish.
-   */
-  async restorePending(id: string): Promise<void> {
-    await this.update(id, {
-      status: "pending",
-      accepted_at: null,
-      accepted_by_user_id: null,
-    });
+  /** Releases this user's accepted claim when their membership write did not commit. */
+  async releaseAcceptance(
+    id: string,
+    acceptedByUserId: string,
+  ): Promise<OrganizationInvite | undefined> {
+    const [updated] = await dbWrite
+      .update(organizationInvites)
+      .set({
+        status: "pending",
+        accepted_at: null,
+        accepted_by_user_id: null,
+        updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(organizationInvites.id, id),
+          eq(organizationInvites.status, "accepted"),
+          eq(organizationInvites.accepted_by_user_id, acceptedByUserId),
+        ),
+      )
+      .returning();
+    return updated;
   }
 
   /**
