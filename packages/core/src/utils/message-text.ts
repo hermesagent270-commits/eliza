@@ -15,14 +15,24 @@ const DOCUMENT_AUGMENTATION_PREFIX =
 // super-linear match time) on long whitespace runs such as pasted logs. The
 // wrapper trims its capture explicitly; the suffix relies on the caller's
 // trailing `.trim()` to drop the newlines the former leading `\n*` matched.
-const USER_REQUEST_WRAPPER = /<user_request>([\s\S]*?)<\/user_request>/i;
+// The request block always follows the documents block, whose text is
+// inserted verbatim and may itself contain the tags: take the last separator.
+const USER_REQUEST_OPEN = "</contextual_documents>\n\n<user_request>";
+const USER_REQUEST_CLOSE = "</user_request>";
+
+function augmentedUserRequest(text: string): string | null {
+	const open = text.lastIndexOf(USER_REQUEST_OPEN);
+	if (open < 0) return null;
+	const start = open + USER_REQUEST_OPEN.length;
+	const end = text.lastIndexOf(USER_REQUEST_CLOSE);
+	return end >= start ? text.slice(start, end) : null;
+}
 const LANGUAGE_INSTRUCTION_SUFFIX = /\[language instruction:[^\]]*\]\s*$/i;
 
 export function extractUserText(raw: string): string {
 	let text = raw;
 	if (text.trimStart().startsWith(DOCUMENT_AUGMENTATION_PREFIX)) {
-		const match = text.match(USER_REQUEST_WRAPPER);
-		const captured = match?.[1]?.trim();
+		const captured = augmentedUserRequest(text)?.trim();
 		if (captured) {
 			text = captured;
 		}
@@ -129,9 +139,7 @@ export function stripAugmentationForPersistence<
  * on every API turn). Text without the wrapper is returned unchanged.
  */
 
-const USER_REQUEST_BLOCK = /<user_request>\n?([\s\S]*?)\n?<\/user_request>\s*$/;
-
 export function userRequestFromAugmentedText(text: string): string {
-	const match = USER_REQUEST_BLOCK.exec(text);
-	return match ? match[1].trim() : text;
+	if (!/<\/user_request>\s*$/.test(text)) return text;
+	return augmentedUserRequest(text)?.trim() ?? text;
 }
