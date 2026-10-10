@@ -1,8 +1,15 @@
 /** Exercises registered McpService discovery against an SDK server over real stdio. */
 import { fileURLToPath } from "node:url";
-import type { AgentRuntime } from "@elizaos/core";
+import {
+  type AgentRuntime,
+  type Content,
+  type Memory,
+  ModelType,
+  stringToUuid,
+} from "@elizaos/core";
 import { createSQLiteTestRuntime } from "@elizaos/testing/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mcpAction } from "../src/actions/mcp";
 import { McpService } from "../src/service";
 import { DEFAULT_PING_CONFIG } from "../src/types";
 
@@ -14,7 +21,7 @@ afterEach(async () => {
   for (const runtime of runtimes.splice(0)) await runtime.stop();
 });
 
-async function start(mode: string, failingList = "") {
+async function start(mode: string, failingList = "", peer = fixture) {
   const runtime = createSQLiteTestRuntime({
     character: {
       name: "mcp-discovery-test",
@@ -22,7 +29,7 @@ async function start(mode: string, failingList = "") {
       settings: {
         mcp: {
           servers: {
-            pages: { type: "stdio", command: "node", args: [fixture, mode, failingList] },
+            pages: { type: "stdio", command: "node", args: [peer, mode, failingList] },
             ...(mode === "endless"
               ? { healthy: { type: "stdio", command: "node", args: [fixture, "single"] } }
               : {}),
@@ -259,4 +266,125 @@ describe("McpService paginated discovery", () => {
       ]);
     });
   });
+});
+
+describe("MCP binary resource persistence", () => {
+  it.each(["call_tool", "read_resource"])(
+    "retains exact binary resources through %s",
+    async (op) => {
+      const peer = fileURLToPath(new URL("./fixtures/audio-result-server.mjs", import.meta.url));
+      const { runtime, service } = await start("binary", "", peer);
+      runtime.registerModel(
+        ModelType.TEXT_SMALL,
+        async () => "Fixture media response",
+        "mcp-fixture",
+        1000
+      );
+      const raw = await service.readResource("pages", "fixture:///media");
+      const message: Memory = {
+        id: stringToUuid(`mcp-resource-${op}`),
+        agentId: runtime.agentId,
+        entityId: runtime.agentId,
+        roomId: stringToUuid(`mcp-resource-room-${op}`),
+        content: { text: "Read the fixture media" },
+      };
+      const replies: Content[] = [];
+      const result = await mcpAction.handler(
+        runtime,
+        message,
+        undefined,
+        {
+          parameters: {
+            action: op,
+            serverName: "pages",
+            toolName: "sample",
+            arguments: {},
+            uri: "fixture:///media",
+          },
+        },
+        async (content) => {
+          replies.push(content);
+          return [];
+        }
+      );
+      expect(result).toMatchObject({ success: true });
+      const attachments = replies.flatMap((reply) => reply.attachments ?? []);
+      expect(attachments).toHaveLength(3);
+      expect(new Set(attachments.map((item) => item.id)).size).toBe(3);
+      for (const [index, original] of raw.contents.entries()) {
+        expect(attachments[index]).toMatchObject({
+          mimeType: original.mimeType,
+          title: original.uri,
+        });
+        expect(attachments[index].url).toBe(`data:${original.mimeType};base64,${original.blob}`);
+      }
+      const memories = await runtime.getMemories({
+        roomId: message.roomId,
+        tableName: op === "call_tool" ? "tools" : "resources",
+        count: 10,
+      });
+      expect(memories).toHaveLength(1);
+      expect(memories[0].content.attachments).toEqual(attachments);
+    }
+  );
+});
+
+describe("MCP resource selection through model feedback", () => {
+  it.each(["fixture:///2", "fixture:///unlisted-linked-result"])(
+    "repairs a missing server selection and reads %s through real stdio",
+    async (uri) => {
+      const peer = fileURLToPath(new URL("./fixtures/resource-result-server.mjs", import.meta.url));
+      const { runtime, service } = await start("text", "", peer);
+      expect(Object.keys(service.getProviderData().data.mcp.pages.resources)).toEqual([
+        "fixture:///2",
+      ]);
+      let smallCalls = 0;
+      const feedback: string[] = [];
+      runtime.registerModel(
+        ModelType.TEXT_SMALL,
+        async () => {
+          smallCalls++;
+          return smallCalls === 1
+            ? JSON.stringify({ serverName: "missing-peer", uri, noResourceAvailable: false })
+            : "The full resource reached the action.";
+        },
+        "resource-selection-fixture",
+        1000
+      );
+      runtime.registerModel(
+        ModelType.TEXT_LARGE,
+        async (_runtime, parameters) => {
+          feedback.push(parameters.prompt);
+          return JSON.stringify({ serverName: "pages", uri, noResourceAvailable: false });
+        },
+        "resource-selection-fixture",
+        1000
+      );
+      const message: Memory = {
+        id: stringToUuid(`mcp-selection-${uri}`),
+        agentId: runtime.agentId,
+        entityId: runtime.agentId,
+        roomId: stringToUuid(`mcp-selection-room-${uri}`),
+        content: { text: `Read the resource at ${uri} from the connected pages server.` },
+      };
+      const result = await mcpAction.handler(
+        runtime,
+        message,
+        undefined,
+        { parameters: { action: "read_resource" } },
+        async () => []
+      );
+      expect(result).toMatchObject({ success: true, data: { output: "last-page resource" } });
+      expect(feedback).toHaveLength(1);
+      expect(feedback[0]).toContain('Server "missing-peer" not found or not connected');
+      expect(smallCalls).toBe(2);
+      const memories = await runtime.getMemories({
+        roomId: message.roomId,
+        tableName: "resources",
+        count: 10,
+      });
+      expect(memories).toHaveLength(1);
+      expect(memories[0].content.text).toContain("last-page resource");
+    }
+  );
 });

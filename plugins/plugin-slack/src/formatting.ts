@@ -30,6 +30,11 @@ function escapeSlackMrkdwnSegment(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
+/** Slack splits `<url|label>` on the first raw pipe, so a pipe in the URL must be encoded. */
+function escapeSlackLinkUrl(url: string): string {
+  return escapeSlackMrkdwnSegment(url.replaceAll("|", "%7C"));
+}
+
 /**
  * Checks if an angle-bracket token is an allowed Slack format
  */
@@ -224,18 +229,24 @@ function convertCodeBlocks(text: string, codeSink: string[]): string {
  * Converts markdown links to Slack mrkdwn links
  */
 function convertLinks(text: string): string {
-  return text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, linkText, url) => {
-    const trimmedUrl = url.trim();
-    const trimmedText = linkText.trim();
-    // If link text matches URL, just use URL
-    if (
-      trimmedText === trimmedUrl ||
-      trimmedText === trimmedUrl.replace(/^mailto:/, "")
-    ) {
-      return `<${escapeSlackMrkdwnSegment(trimmedUrl)}>`;
-    }
-    return `<${escapeSlackMrkdwnSegment(trimmedUrl)}|${escapeSlackMrkdwnSegment(trimmedText)}>`;
-  });
+  // The URL group tolerates one level of balanced parentheses, as the
+  // Telegram converter does: a plain [^)]+ capture cuts a Wikipedia-style
+  // URL at its inner closing paren and leaves a malformed link token.
+  return text.replace(
+    /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))+)\)/g,
+    (_, linkText, url) => {
+      const trimmedUrl = url.trim();
+      const trimmedText = linkText.trim();
+      // If link text matches URL, just use URL
+      if (
+        trimmedText === trimmedUrl ||
+        trimmedText === trimmedUrl.replace(/^mailto:/, "")
+      ) {
+        return `<${escapeSlackLinkUrl(trimmedUrl)}>`;
+      }
+      return `<${escapeSlackLinkUrl(trimmedUrl)}|${escapeSlackMrkdwnSegment(trimmedText)}>`;
+    },
+  );
 }
 
 /**
@@ -587,7 +598,7 @@ export function formatSlackSpecialMention(
  * Formats a Slack link
  */
 export function formatSlackLink(url: string, text?: string): string {
-  const safeUrl = escapeSlackMrkdwnSegment(url);
+  const safeUrl = escapeSlackLinkUrl(url);
   if (text && text !== url) {
     return `<${safeUrl}|${escapeSlackMrkdwnSegment(text)}>`;
   }

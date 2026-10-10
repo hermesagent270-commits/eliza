@@ -746,7 +746,58 @@ function toolCallIds(toolCalls: unknown): string[] {
 function sanitizeNativeMessages(
   messages: Array<Record<string, unknown>>
 ): Array<Record<string, unknown>> {
-  const result = messages.map((message) => ({ ...message }));
+  // Core history uses canonical content parts; the gateway accepts OpenAI
+  // linkage fields. Normalize before orphan checks, without changing callers.
+  const result = messages.flatMap<Record<string, unknown>>((message) => {
+    if (!Array.isArray(message.content)) return [{ ...message }];
+    if (message.role === "assistant") {
+      const calls = message.content.filter((part) => isRecord(part) && part.type === "tool-call");
+      if (calls.length === 0) return [{ ...message }];
+      const content = message.content.filter((part) => !isRecord(part) || part.type !== "tool-call");
+      return [
+        {
+          ...message,
+          content: content.length ? content : null,
+          tool_calls: [
+            ...(Array.isArray(message.tool_calls) ? message.tool_calls : []),
+            ...calls.map((part) => {
+              const id = firstString(part.toolCallId),
+                name = firstString(part.toolName);
+              if (!id || !name)
+                throw invalidNativeToolCall("canonical history call is missing its id or name");
+              return {
+                id,
+                type: "function",
+                function: {
+                  name,
+                  arguments: JSON.stringify(part.input === undefined ? {} : part.input),
+                },
+              };
+            }),
+          ],
+        },
+      ];
+    }
+    if (message.role === "tool") {
+      return message.content.map((part) => {
+        if (!isRecord(part) || part.type !== "tool-result") return { ...message, content: [part] };
+        const id = firstString(part.toolCallId);
+        if (!id) throw invalidNativeToolCall("canonical history result is missing its call id");
+        const output = asRecord(part.output);
+        // Match the OpenAI SDK's canonical result semantics, including JSON
+        // scalar/null values and denied execution. Unknown output stays data.
+        const content = ["json", "error-json", "content"].includes(String(output.type))
+          ? JSON.stringify(output.value)
+          : output.type === "execution-denied"
+            ? (output.reason ?? "Tool execution denied.")
+            : stringifyMessageContent(
+                ["text", "error-text"].includes(String(output.type)) ? output.value : part.output
+              );
+        return { ...message, tool_call_id: id, content };
+      });
+    }
+    return [{ ...message }];
+  });
   let openAssistant: Record<string, unknown> | null = null;
   let matchedToolMessages: Array<Record<string, unknown>> = [];
   let pending = new Set<string>();
@@ -799,27 +850,39 @@ function sanitizeNativeMessages(
 function buildNativeMessages(
   params: GenerateTextParamsWithNativeOptions,
   promptText: string,
-  systemPrompt?: string
+  systemPrompt?: string,
+  responseFormat?: unknown
 ): Array<Record<string, unknown>> {
+  let messages: Array<Record<string, unknown>>;
   if (Array.isArray(params.messages) && params.messages.length > 0) {
-    const messages = params.messages.map((message) =>
+    messages = params.messages.map((message) =>
       isRecord(message)
         ? { ...message }
         : { role: "user", content: stringifyMessageContent(message) }
     );
-    const first = asRecord(messages[0]);
-    const withSystem =
-      systemPrompt && first.role !== "system"
-        ? [{ role: "system", content: systemPrompt }, ...messages]
-        : messages;
-    return sanitizeNativeMessages(withSystem);
+    if (systemPrompt && messages[0].role !== "system") {
+      messages.unshift({ role: "system", content: systemPrompt });
+    }
+    messages = sanitizeNativeMessages(messages);
+  } else {
+    messages = [];
+    if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+    messages.push({ role: "user", content: promptText });
   }
 
-  const messages: Array<Record<string, unknown>> = [];
-  if (systemPrompt) {
-    messages.push({ role: "system", content: systemPrompt });
+  // The native gateway omits schema response formats unless explicitly supplied.
+  // Keep the caller's complete output contract in model-visible instructions.
+  if (params.responseSchema && asRecord(responseFormat).type !== "json_schema") {
+    const instruction = `Return only JSON matching this schema; do not add prohibited fields.\nResponse JSON schema:\n${JSON.stringify(unwrapJsonSchema(params.responseSchema))}`;
+    const first = messages[0];
+    if (first.role === "system" && typeof first.content === "string") {
+      first.content += `\n\n${instruction}`;
+    } else if (first.role === "system" && Array.isArray(first.content)) {
+      first.content = [...first.content, { type: "text", text: instruction }];
+    } else {
+      messages.unshift({ role: "system", content: instruction });
+    }
   }
-  messages.push({ role: "user", content: promptText });
   return messages;
 }
 
@@ -937,8 +1000,8 @@ function buildNativeResponseFormat(responseSchema: unknown, _modelName: string):
   // The Cloud's native `/chat/completions` gateway 400s on `response_format`
   // for its served models — BOTH `json_schema` AND `json_object`, verified
   // live against zai-glm-4.7 AND gemma-4-31b (each: with either format → 400,
-  // without → 200). The structured schema is already embedded in the prompt
-  // body and the caller repairs/validates the returned JSON, so omit
+  // without → 200). buildNativeMessages supplies the complete schema in the
+  // system instructions and the caller validates returned JSON, so omit
   // `response_format` entirely; otherwise every structured-output call (the
   // trajectory evaluator, the planner) fails with `Bad Request` and breaks
   // every tool-using turn (web search, price lookups, sub-agent spawns).
@@ -1038,7 +1101,7 @@ function buildNativeRequestBody(
   const responseFormat = buildNativeResponseFormat(params.responseSchema, modelName);
   const requestBody: Record<string, unknown> = {
     model: modelName,
-    messages: buildNativeMessages(params, promptText, systemPrompt),
+    messages: buildNativeMessages(params, promptText, systemPrompt, responseFormat),
   };
   // An omitted output budget remains omitted. The selected provider owns its
   // real model boundary; core defaults would silently turn a complete request
@@ -1053,10 +1116,9 @@ function buildNativeRequestBody(
   const userReasoningEffort = resolveUserReasoningEffort(runtime, modelName);
   if (userReasoningEffort) {
     requestBody.reasoning_effort = userReasoningEffort;
-  } else if (normalizeCerebrasModelId(modelName) === "qwen-3.8-27b") {
-    // Qwen defaults to high reasoning upstream; interactive Cloud calls use
-    // the same non-reasoning default as direct Cerebras calls unless pinned.
-    requestBody.reasoning_effort = "none";
+  } else if (resolveCerebrasThinkingOffReasoningEffort(modelName) !== undefined) {
+    // Use the highest supported Cerebras effort unless the caller selects one.
+    requestBody.reasoning_effort = "high";
   }
   // The runtime signals "don't reason" via providerOptions.eliza.thinking="off"
   // (e.g. the Stage-1 RESPONSE_HANDLER formatting call), but
@@ -1584,6 +1646,11 @@ export async function generateNativeChatCompletion(
 		finishReason: data.choices?.[0]?.finish_reason,
 		provider: "elizacloud",
 		model: context.modelName,
+		maxTokens: typeof requestBody.max_tokens === "number" ? requestBody.max_tokens : null,
+		finishReasonSource: "cloud-chat-completions",
+		emptyVisibleOutput: !text.trim() && toolCalls.length === 0,
+		usage,
+		costUsd: extractCostUsd(data.usage, response),
 	});
   if (!text.trim() && toolCalls.length === 0) {
     throw new Error("elizaOS Cloud returned no text or tool calls");
