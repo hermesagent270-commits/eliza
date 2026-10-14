@@ -41,4 +41,8 @@ export async function installOrganizationBillingScopeTestColumns(
   await execute(column.replace("ADD COLUMN", "ADD COLUMN IF NOT EXISTS"));
   await installBillingCommandEvidenceTestColumns(execute);
   await installSubscriptionGrantTestSchema(execute);
+  // Infrastructure fixtures never publish pilot grants; full app tests apply 0543 constraints.
+  await execute(
+    "ALTER TABLE subscription_allowance_periods ADD COLUMN IF NOT EXISTS pilot_redemption_id uuid",
+  );
 }

@@ -30,7 +30,7 @@ export function browserWorkspacePatternMatches(
         wildcardPattern += ".*";
         index += 1;
       } else {
-        wildcardPattern += ".*";
+        wildcardPattern += "[^/]*";
       }
       continue;
     }

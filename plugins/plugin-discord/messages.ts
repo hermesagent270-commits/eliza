@@ -188,9 +188,12 @@ export function numericFactSignatureTokens(text: string): Set<string> | null {
 	const trimmed = text.trim();
 	if (trimmed.length === 0 || trimmed.length > NUMERIC_FACT_MAX_LEN)
 		return null;
+	// Keep words of every script; an ASCII-only class reduced non-Latin replies
+	// to bare numbers, so distinct replies sharing a number looked like subsets.
 	const tokens = trimmed
+		.normalize("NFKC")
 		.toLowerCase()
-		.replace(/[^a-z0-9., ]+/g, " ")
+		.replace(/[^\p{L}\p{N}\p{M}., ]+/gu, " ")
 		.split(/\s+/)
 		.map((token) => token.replace(/^[.,]+/, "").replace(/[.,]+$/, ""))
 		.filter(
@@ -1588,8 +1591,15 @@ export class MessageManager {
 			}
 		}
 
+		// Discord autocomplete offers the bot's managed integration role under the
+		// bot's own name, so `<@&role>` for that role is a mention of the bot.
+		// (`mentions.has()` would also match other roles the bot holds and
+		// @everyone.)
+		const botRoleId = message.guild?.members.me?.roles.botRole?.id;
 		const isBotPlatformMentioned = !!(
-			clientUser?.id && message.mentions.users?.has(clientUser.id)
+			clientUser?.id &&
+			(message.mentions.users?.has(clientUser.id) ||
+				(botRoleId && message.mentions.roles?.has(botRoleId)))
 		);
 		const isReplyToBot =
 			!!message.reference?.messageId &&

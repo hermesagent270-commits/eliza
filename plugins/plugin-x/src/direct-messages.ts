@@ -409,6 +409,9 @@ export class TwitterDirectMessageClient {
     }
 
     const conversationId = event.dm_conversation_id ?? senderId;
+    // A group conversation is not a private one-to-one chat: respond and
+    // privacy rules key on the room type.
+    const channelType = isGroup ? ChannelType.GROUP : ChannelType.DM;
     // DMs and public interactions share the sender's canonical X world. Older
     // connector builds already attached DM rooms to this world, so reusing it
     // also repairs their raw platform-id ownership metadata on the next poll.
@@ -433,7 +436,7 @@ export class TwitterDirectMessageClient {
       id: roomId,
       name: `X DM with @${username}`,
       source: "x",
-      type: ChannelType.DM,
+      type: channelType,
       channelId: conversationId,
       serverId: senderId,
       worldId,
@@ -445,7 +448,7 @@ export class TwitterDirectMessageClient {
       userName: username,
       name: displayName,
       source: "x",
-      type: ChannelType.DM,
+      type: channelType,
       worldId,
     });
 
@@ -457,7 +460,11 @@ export class TwitterDirectMessageClient {
       agentId: this.runtime.agentId,
       entityId,
       roomId,
-      content: { text: event.text?.trim() ?? "", source: "x" },
+      content: {
+        text: event.text?.trim() ?? "",
+        source: "x",
+        channelType,
+      },
       metadata: {
         type: "message",
         source: "x",
@@ -469,7 +476,7 @@ export class TwitterDirectMessageClient {
         fromBot: false,
         fromId: senderId,
         sourceId: entityId,
-        chatType: ChannelType.DM,
+        chatType: channelType,
         messageIdFull: event.id,
         twitter: {
           accountId: this.client.accountId,

@@ -17,7 +17,7 @@ import {
   decodeSocialMediaBase64,
   downloadSocialMediaBytes,
 } from "../media-download";
-import { withRetry } from "../rate-limit";
+import { type RetryOptions, withRetry } from "../rate-limit";
 
 const TWITTER_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -42,6 +42,7 @@ async function twitterApiRequest<T>(
   endpoint: string,
   accessToken: string,
   options: RequestInit = {},
+  retry: Pick<RetryOptions, "replayUnknownOutcome"> = {},
 ): Promise<T> {
   const url = endpoint.startsWith("http") ? endpoint : `${TWITTER_API_BASE}${endpoint}`;
   const { data } = await withRetry<T>(
@@ -55,7 +56,7 @@ async function twitterApiRequest<T>(
         },
       }),
     async (response) => response.json(),
-    { platform: "twitter", maxRetries: 3 },
+    { platform: "twitter", maxRetries: 3, ...retry },
   );
   return data;
 }
@@ -296,10 +297,17 @@ export const twitterProvider: SocialMediaProvider = {
 
       const response = await twitterApiRequest<{
         data: { id: string; text: string };
-      }>("/tweets", credentials.accessToken, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
+      }>(
+        "/tweets",
+        credentials.accessToken,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+        // A replay after a timeout or a 5xx is refused by X as duplicate
+        // content, which turned a published tweet into a reported failure.
+        { replayUnknownOutcome: false },
+      );
 
       return {
         platform: "twitter",

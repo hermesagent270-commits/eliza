@@ -3,7 +3,9 @@
 import type { IAgentRuntime } from "@elizaos/core";
 import { Service } from "@elizaos/core";
 import type { MapsProviderAdapter } from "./adapter.js";
+import { ElizaCloudMapsAdapter } from "./cloud-adapter.js";
 import { MapsError } from "./errors.js";
+import type { MapsDeviceNavigation } from "./navigation.js";
 import { RuntimeSavedPlaceStore, type SavedPlaceStore } from "./store.js";
 import {
   coordinatesSchema,
@@ -151,13 +153,47 @@ export class MapsService extends Service {
     this.store = store ?? new RuntimeSavedPlaceStore(this.runtime);
   }
 
+  private deviceNavigation: MapsDeviceNavigation | null = null;
+
+  /**
+   * Registers the Eliza Cloud Maps adapter when the runtime has an Eliza Cloud
+   * API key. Cloud supplies data only; navigation stays with the device host.
+   */
   static override async start(runtime: IAgentRuntime): Promise<MapsService> {
-    return new MapsService(runtime);
+    const service = new MapsService(runtime);
+    const apiKey = runtime.getSetting?.("ELIZAOS_CLOUD_API_KEY");
+    if (typeof apiKey === "string" && apiKey.trim()) {
+      const baseUrl = runtime.getSetting?.("ELIZAOS_CLOUD_BASE_URL");
+      service.registerAdapter(
+        new ElizaCloudMapsAdapter({
+          apiKey,
+          baseUrl: typeof baseUrl === "string" ? baseUrl : undefined,
+        }),
+      );
+    }
+    return service;
   }
 
   override async stop(): Promise<void> {
     this.providers.clear();
     this.defaultAdapterId = null;
+    this.deviceNavigation = null;
+  }
+
+  /** The device host (phone) registers its navigation owner; null removes it. */
+  registerDeviceNavigation(controller: MapsDeviceNavigation | null): void {
+    this.deviceNavigation = controller;
+  }
+
+  /** The registered device navigation owner, or a typed unavailable error. */
+  requireDeviceNavigation(): MapsDeviceNavigation {
+    if (!this.deviceNavigation) {
+      throw new MapsError(
+        "Navigation runs on the phone, and no phone navigation is connected to this agent.",
+        { code: "MAPS_DEVICE_UNAVAILABLE" },
+      );
+    }
+    return this.deviceNavigation;
   }
 
   registerAdapter(adapter: MapsProviderAdapter, makeDefault = false): void {
@@ -296,7 +332,48 @@ export class MapsService extends Service {
     expectedGeneration?: number,
   ): Promise<MapsRouteResult> {
     const registration = this.provider(provider, expectedGeneration);
+    const normalized = this.routeRequest(request, registration.adapter);
+    return {
+      route: this.boundRoute(
+        await registration.adapter.planRoute(normalized),
+        normalized,
+        registration.adapter,
+      ),
+      provider: this.copyDescription(registration.description),
+    };
+  }
+
+  /**
+   * Plans the recommended route and any provider alternatives. An adapter
+   * without alternatives returns exactly its single route.
+   */
+  async planRouteAlternativesResult(
+    request: RoutePlanRequest,
+    provider?: string,
+  ): Promise<{ routes: RoutePlan[]; provider: MapsProviderDescription }> {
+    const registration = this.provider(provider);
     const { adapter } = registration;
+    const normalized = this.routeRequest(request, adapter);
+    const routes = adapter.planRouteAlternatives
+      ? await adapter.planRouteAlternatives(normalized)
+      : [await adapter.planRoute(normalized)];
+    if (routes.length === 0) {
+      throw new MapsError("No route is available between these places.", {
+        code: "MAPS_NOT_FOUND",
+      });
+    }
+    return {
+      routes: routes.map((route) =>
+        this.boundRoute(route, normalized, adapter),
+      ),
+      provider: this.copyDescription(registration.description),
+    };
+  }
+
+  private routeRequest(
+    request: RoutePlanRequest,
+    adapter: MapsProviderAdapter,
+  ): RoutePlanRequest {
     const normalized = {
       origin: validated(
         placeRefSchema,
@@ -334,9 +411,17 @@ export class MapsService extends Service {
         }
       }
     }
+    return normalized;
+  }
+
+  private boundRoute(
+    candidate: RoutePlan,
+    normalized: RoutePlanRequest,
+    adapter: MapsProviderAdapter,
+  ): RoutePlan {
     const route = validated(
       routePlanSchema,
-      await adapter.planRoute(normalized),
+      candidate,
       "Maps provider returned an invalid route.",
     );
     if (route.provider !== adapter.id) {
@@ -407,10 +492,7 @@ export class MapsService extends Service {
         },
       );
     }
-    return {
-      route,
-      provider: this.copyDescription(registration.description),
-    };
+    return route;
   }
 
   async savePlace(request: SavePlaceRequest): Promise<SavePlaceResult> {

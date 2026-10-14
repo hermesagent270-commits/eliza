@@ -37,6 +37,11 @@ import {
   validateReminderCreate,
 } from "./reminder-create-contract.ts";
 import {
+  SMS_SEND_CAPABILITY,
+  type SmsSendOperation,
+  validateSmsSend,
+} from "./sms-contract.ts";
+import {
   validateWorkflowBinding,
   validateWorkflowReadOperation,
   type WorkflowDeviceBinding,
@@ -70,6 +75,7 @@ export const DEVICE_VIEWS = [
   "workflows",
 ] as const;
 export type DeviceOperation =
+  | SmsSendOperation
   | ReminderCreateOperation
   | ClockOperation
   | MapsOperation
@@ -90,6 +96,8 @@ export function deviceOperationSupportedByCapabilities(
   type: string,
   capabilities?: readonly string[],
 ): boolean {
+  if (type === "sms_send")
+    return capabilities?.includes(SMS_SEND_CAPABILITY) === true;
   if (type === "calendar_create_local")
     return capabilities?.includes(CALENDAR_CREATE_CAPABILITY) === true;
   if (type === "calendar_read_next")
@@ -227,6 +235,12 @@ export function validateDeviceOperation(value: unknown): DeviceOperation {
             ? "Invalid Calendar availability operation. Use canonical UTC start/end with milliseconds (YYYY-MM-DDTHH:mm:ss.sssZ), end after start and at most seven days later, and a valid IANA timeZone."
             : `Invalid ${String(p.type).replace("_", " ")} operation: ${(error as Error).message}`,
         );
+      }
+    case "sms_send":
+      try {
+        return validateSmsSend(p);
+      } catch {
+        throw new DeviceActionError("Invalid reviewed SMS operation");
       }
     case "post_notification":
       exactKeys(p, ["type", "title", "body"]);

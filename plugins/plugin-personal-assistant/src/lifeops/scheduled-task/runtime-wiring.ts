@@ -110,6 +110,7 @@ import {
   getLocalDateKey,
   getZonedDateParts,
 } from "../time.js";
+import { withWorkThreadFollowupAdmission } from "../work-threads/followup-admission.js";
 import {
   behaviouralBaselineFromProfile,
   readActivityProfile,
@@ -1504,7 +1505,9 @@ function buildLifeOpsRunnerDeps(
     },
 
     executionBoundary: (task, execute) =>
-      withFamilyScheduledExecution(opts.runtime, task, execute, opts.agentId),
+      withWorkThreadFollowupAdmission(opts.runtime, task, () =>
+        withFamilyScheduledExecution(opts.runtime, task, execute, opts.agentId),
+      ),
     logStore: stores.logStore,
     gates,
     completionChecks,

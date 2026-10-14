@@ -29,6 +29,8 @@ let client: {
 let close: typeof import("../client").closeDatabaseConnectionsForTests;
 let repository: import("./app-subscription-authority").AppSubscriptionAuthorityRepository;
 const org = randomUUID();
+const promotionalOrg = randomUUID();
+const promotionalPeriod = randomUUID();
 const user = randomUUID();
 const merchant = randomUUID();
 const appA = randomUUID();
@@ -114,8 +116,26 @@ beforeAll(async () => {
   );
   if (!pilotMigration) throw new Error("Pilot migration is absent from the canonical ledger");
   for (const statement of pilotMigration.statements) await client.exec(statement);
-  await installBillingCommandEvidenceTestColumns((statement) => client.exec(statement));
   await installSubscriptionGrantTestSchema((statement) => client.exec(statement));
+  // Keep a real existing promotional bucket across the pilot migration.
+  await client.query("INSERT INTO organizations(id) VALUES($1)", [promotionalOrg]);
+  await client.query(
+    `WITH code AS (
+      INSERT INTO subscription_grant_codes(code_hash,max_redemptions) VALUES($1,1) RETURNING id
+    ), grant_row AS (
+      INSERT INTO subscription_grants(organization_id,code_id,family,plan_key,catalog_version,idempotency_key,starts_at,ends_at)
+      SELECT $2,id,'alpha_phone','plus_monthly','v1','pilot-migration-coexistence',now(),now()+interval '1 month' FROM code RETURNING id
+    )
+    INSERT INTO subscription_allowance_periods(id,organization_id,provider,provider_environment,grant_source,promo_grant_id,plan_key,catalog_version,period_start,period_end,expires_at,granted_amount,available_amount)
+    SELECT $3,$2,'eliza','test','promo_grant',id,'plus_monthly','v1',now(),now()+interval '1 month',now()+interval '1 month',25,25 FROM grant_row`,
+    ["b".repeat(64), promotionalOrg, promotionalPeriod],
+  );
+  const pilotAllowance = canonical.find(
+    (migration) => migration.entry.tag === "0543_app_pilot_allowance",
+  );
+  if (!pilotAllowance) throw new Error("Pilot allowance migration is missing");
+  for (const statement of pilotAllowance.statements) await client.exec(statement);
+  await installBillingCommandEvidenceTestColumns((statement) => client.exec(statement));
 
   await client.query(
     `INSERT INTO billing_merchants(id,organization_id,provider_account_key,livemode,enabled) VALUES ($1,$2,'platform',false,true)`,
@@ -171,6 +191,20 @@ async function prepare(appId: string, planRevisionId: string, key = randomUUID()
   });
   return { account, scope, command };
 }
+
+test("pilot migration preserves an existing promotional allowance and rejects mixed source authority", async () => {
+  const result = await client.query(
+    "UPDATE subscription_allowance_periods SET available_amount=24,settled_amount=1 WHERE id=$1 RETURNING grant_source,pilot_redemption_id",
+    [promotionalPeriod],
+  );
+  expect(result.rows).toEqual([{ grant_source: "promo_grant", pilot_redemption_id: null }]);
+  await expect(
+    client.query(
+      "UPDATE subscription_allowance_periods SET provider='pilot',grant_source='pilot' WHERE id=$1",
+      [promotionalPeriod],
+    ),
+  ).rejects.toThrow();
+});
 
 describe("generic app subscription authority", () => {
   test("migration preserves infrastructure money and customer ownership", async () => {
@@ -649,6 +683,10 @@ describe("atomic app subscription finalization", () => {
     if (!predecessor) throw new Error("Historical invoice constraint is missing");
     await client.exec("BEGIN");
     try {
+      // This historical migration predates promotional grants. Isolate its fixture rows.
+      await client.query("DELETE FROM subscription_allowance_periods WHERE id=$1", [
+        promotionalPeriod,
+      ]);
       await client.exec(
         "ALTER TABLE subscription_allowance_periods DROP CONSTRAINT subscription_allowance_periods_invoice_id_check",
       );
@@ -670,8 +708,17 @@ describe("atomic app subscription finalization", () => {
         result.allowance!.id,
       ]);
     const before = await rows();
-    for (const statement of invoiceAuthorityMigration) await client.exec(statement);
-    expect(await rows()).toEqual(before);
+    await client.exec("BEGIN");
+    try {
+      await client.query("DELETE FROM subscription_allowance_periods WHERE id=$1", [
+        promotionalPeriod,
+      ]);
+      for (const statement of invoiceAuthorityMigration) await client.exec(statement);
+      expect(await rows()).toEqual(before);
+    } finally {
+      // Restore the current constraint and promotional fixture after testing historical DDL.
+      await client.exec("ROLLBACK");
+    }
   });
   test("late outbox failure rolls back subscription, grant, projection and command result together", async () => {
     const { appSubscriptionFinalizer } = await import("./app-subscription-finalizer");
@@ -1240,7 +1287,39 @@ describe("sponsored pilot admission ledger", () => {
           [account.scope.scopeId],
         )
       ).rows,
-    ).toEqual([{ n: 0 }]);
+    ).toEqual([{ n: 6 }]);
+  });
+  test("publication failure rolls back redemption, allowance and campaign capacity together", async () => {
+    const account = await pilotAccount();
+    const offer = await campaign(1);
+    await invite(offer.id, account.scope.eligibilityPrincipalId);
+    await client.exec(
+      "CREATE FUNCTION reject_pilot_activation_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'controlled activation failure'; END $$; CREATE TRIGGER reject_pilot_activation_test BEFORE INSERT ON app_pilot_activations FOR EACH ROW EXECUTE FUNCTION reject_pilot_activation_test()",
+    );
+    try {
+      await expect(redeem(account, offer.code)).rejects.toThrow();
+      expect(
+        (
+          await client.query(
+            "SELECT count(*)::integer n FROM app_pilot_redemptions WHERE campaign_id=$1",
+            [offer.id],
+          )
+        ).rows,
+      ).toEqual([{ n: 0 }]);
+      expect(
+        (
+          await client.query(
+            "SELECT count(*)::integer n FROM subscription_allowance_periods WHERE billing_scope_id=$1",
+            [account.scope.scopeId],
+          )
+        ).rows,
+      ).toEqual([{ n: 0 }]);
+    } finally {
+      await client.exec(
+        "DROP TRIGGER reject_pilot_activation_test ON app_pilot_activations; DROP FUNCTION reject_pilot_activation_test()",
+      );
+    }
+    expect((await redeem(account, offer.code)).replayed).toBe(false);
   });
   test("another billing account for the same principal cannot restart the pilot", async () => {
     const first = await pilotAccount();

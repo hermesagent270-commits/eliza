@@ -14,10 +14,18 @@ export interface ApiResponse<T> {
   data: T;
 }
 
-interface RetryOptions {
+export interface RetryOptions {
   maxRetries?: number;
   baseDelayMs?: number;
   platform: SocialPlatform;
+  /**
+   * Whether a request whose outcome is unknown (a timeout, a dropped
+   * connection, a 5xx from a proxy) may be sent again. A rate-limited (429)
+   * answer is never an unknown outcome and is always retried. Create calls
+   * that the platform cannot deduplicate pass `false`, so a slow success is
+   * reported as a failure instead of being published twice.
+   */
+  replayUnknownOutcome?: boolean;
 }
 
 const PLATFORM_RATE_LIMITS: Record<
@@ -107,7 +115,7 @@ export async function withRetry<T>(
   parser: (response: Response) => Promise<T>,
   options: RetryOptions,
 ): Promise<ApiResponse<T>> {
-  const { maxRetries = 3, baseDelayMs = 1000, platform } = options;
+  const { maxRetries = 3, baseDelayMs = 1000, platform, replayUnknownOutcome = true } = options;
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -147,6 +155,7 @@ export async function withRetry<T>(
       // error-policy:J1 outbound social-platform API transport boundary — retries transient failures and propagates the last error after exhausting retries (fail-closed)
       lastError = error instanceof Error ? error : new Error(String(error));
       if ((error as RateLimitError).rateLimited) throw error;
+      if (!replayUnknownOutcome) throw lastError;
 
       if (attempt < maxRetries) {
         const delayMs = clampRateLimitWaitMs(baseDelayMs * 2 ** attempt);

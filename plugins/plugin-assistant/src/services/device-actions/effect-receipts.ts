@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   isNamedTargetOperation,
   validateNamedTargetResult,
@@ -10,6 +11,11 @@ import {
 import type { ApprovalEnqueueResult } from "../approval/types.ts";
 import { type DeviceOperation, validateDevicePayload } from "./contract.ts";
 import { namedTargetValidators } from "./foreground-review-contract.ts";
+import {
+  isSmsSend,
+  smsBindingText,
+  validateSmsResult,
+} from "./sms-contract.ts";
 
 /** Only call after authenticated proposal lookup and operation-result validation.
  * Proof refers to persisted queue/native operation identities, never payload text. */
@@ -47,6 +53,33 @@ export function deviceActionEffectReceipts(
     provider?.outcome === "applied" &&
     typeof provider.operationId === "string"
   ) {
+    if (isSmsSend(operation)) {
+      validateSmsResult(
+        operation,
+        provider.result,
+        provider.operationId,
+        createHash("sha256").update(smsBindingText(operation)).digest("hex"),
+      );
+      return [
+        normalizeEffectReceipt({
+          ...base,
+          receiptId: execution.attemptId,
+          operation: "device.sms.submit",
+          resource: { kind: "device.sms.submission", id: provider.operationId },
+          idempotency: {
+            key: execution.providerIdempotencyKey,
+            replayed: true,
+          },
+          outcome: "applied",
+          commit: {
+            kind: "provider_accepted",
+            id: provider.operationId,
+            committedAt: request.updatedAt.toISOString(),
+          },
+          // This receipt only proves submission. The typed result separately records modem/delivery evidence.
+        }),
+      ];
+    }
     const read = deviceOperationIsRead(operation.type);
     const noMatch =
       isNamedTargetOperation(operation) &&
@@ -177,6 +210,7 @@ function deviceOperationIsRead(type: DeviceOperation["type"]): boolean {
     case "calendar_create":
     case "calendar_update":
     case "calendar_delete":
+    case "sms_send":
     case "clock_handoff":
     case "clock_alarm":
     case "create_note":

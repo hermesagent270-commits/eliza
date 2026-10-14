@@ -425,21 +425,64 @@ function buildIntlWeekdayMap(): Record<string, number> {
 const MONTH_MAP: Record<string, number> = buildIntlMonthMap();
 const WEEKDAY_MAP: Record<string, number> = buildIntlWeekdayMap();
 
+// `\b` is ASCII-only, so it never matches beside Hangul or Han. Letters and
+// digits of every script are word characters, except Hangul, Han and kana,
+// which may abut particles ("금요일에", "星期五下午").
+const SPACED_WORD_CHAR = String.raw`(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[\p{L}\p{M}\p{N}_]`;
+const SPACED_WORD_CHAR_PATTERN = new RegExp(`^${SPACED_WORD_CHAR}$`, "u");
+
+function wholeWordSource(name: string): string {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const open = SPACED_WORD_CHAR_PATTERN.test(name.at(0) ?? "")
+    ? `(?<!${SPACED_WORD_CHAR})`
+    : "";
+  const close = SPACED_WORD_CHAR_PATTERN.test(name.at(-1) ?? "")
+    ? `(?!${SPACED_WORD_CHAR})`
+    : "";
+  return `${open}${escaped}${close}`;
+}
+
 const MONTH_NAMES_SORTED = Object.keys(MONTH_MAP).sort(
   (a, b) => b.length - a.length,
 );
 const MONTH_NAME_PATTERN = new RegExp(
-  `\\b(${MONTH_NAMES_SORTED.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`,
-  "i",
+  `(${MONTH_NAMES_SORTED.map(wholeWordSource).join("|")})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`,
+  "iu",
 );
 
-const WEEKDAY_NAMES_SORTED = Object.keys(WEEKDAY_MAP).sort(
-  (a, b) => b.length - a.length,
-);
+// One-syllable Korean short forms (일, 월, 수, 금, …) are everyday words.
+const WEEKDAY_NAMES_SORTED = Object.keys(WEEKDAY_MAP)
+  .filter((name) => name.length > 1)
+  .sort((a, b) => b.length - a.length);
+// Han weekday names are week-word compounds ("周五", "星期日"), and the same
+// characters also spell counts and other words: "一周五天" (five days a week),
+// "一周日程" (a week's schedule). A count before the week word, or a following
+// character that continues a different word, means no weekday was named.
+const HAN_WEEKDAY_PREFIX = /^(?:周|週|星期|礼拜|禮拜)/u;
+const HAN_COUNT_BEFORE =
+  "(?<![〇零一二两兩三四五六七八九十百几幾数數0-9０-９])";
+const HAN_SUNDAY_COMPOUND_AFTER = "(?![程期子常记記历曆])";
+const HAN_NUMBERED_DAY_COUNT_AFTER = "(?![天次个個年月周週遍回])";
+function weekdayNameSource(name: string): string {
+  const source = wholeWordSource(name);
+  if (!HAN_WEEKDAY_PREFIX.test(name)) return source;
+  return `${HAN_COUNT_BEFORE}${source}${
+    name.endsWith("日")
+      ? HAN_SUNDAY_COMPOUND_AFTER
+      : HAN_NUMBERED_DAY_COUNT_AFTER
+  }`;
+}
 const WEEKDAY_NAME_PATTERN = new RegExp(
-  `\\b(?:(this|next)\\s+)?(${WEEKDAY_NAMES_SORTED.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\b`,
-  "i",
+  `(?:(?<!${SPACED_WORD_CHAR})(this|next)\\s+)?(${WEEKDAY_NAMES_SORTED.map(weekdayNameSource).join("|")})`,
+  "iu",
 );
+// Korean and Chinese put the week qualifier before the weekday name
+// ("다음 주 금요일", "下周五", "下周星期五", "下周的星期五"). Past and
+// every-week forms name no single upcoming date, so they are left unresolved.
+const CJK_NEXT_WEEK_QUALIFIER =
+  /(?:(?<![\p{L}\p{N}])(?:다음\s*주|담주)(?:\s*의)?|下个?(?:周|星期|礼拜|禮拜)?的?)\s*$/u;
+const CJK_UNRESOLVED_WEEK_QUALIFIER =
+  /(?:(?<![\p{L}\p{N}])(?:지난\s*주|지난|저번\s*주|저번|매주|매)(?:\s*의)?|(?:上个?|每个?)(?:周|星期|礼拜|禮拜)?的?)\s*$/u;
 // Accepted alternate spellings for planner details live beside the
 // planner-facing schema (calendar-action-schema.ts: CALENDAR_DETAIL_ALIASES)
 // so the two surfaces are reviewed together.
@@ -1750,8 +1793,13 @@ export function parseExplicitLocalDate(
   }
 
   const weekdayMatch = normalized.match(WEEKDAY_NAME_PATTERN);
-  if (weekdayMatch) {
-    const qualifier = normalizeLookupKey(weekdayMatch[1] ?? "");
+  const beforeWeekday = weekdayMatch
+    ? normalized.slice(0, weekdayMatch.index)
+    : "";
+  if (weekdayMatch && !CJK_UNRESOLVED_WEEK_QUALIFIER.test(beforeWeekday)) {
+    const qualifier = CJK_NEXT_WEEK_QUALIFIER.test(beforeWeekday)
+      ? "next"
+      : normalizeLookupKey(weekdayMatch[1] ?? "");
     const weekdayKey = normalizeLookupKey(weekdayMatch[2] ?? "");
     const targetWeekday = WEEKDAY_MAP[weekdayKey];
     if (targetWeekday !== undefined) {
@@ -2445,7 +2493,7 @@ function distinctStatedLocalDates(
   // A comma inside a month/day/year date is not a boundary between requests.
   // Retain its year before splitting separate date clauses for intent narrowing.
   const dateClauses = text.replace(
-    new RegExp(MONTH_NAME_PATTERN.source, "gi"),
+    new RegExp(MONTH_NAME_PATTERN.source, "giu"),
     (date) => date.replace(/,\s*(?=\d{4}\b)/, " "),
   );
   for (const segment of dateClauses.split(DATE_SEGMENT_SPLIT_PATTERN)) {

@@ -1441,13 +1441,6 @@ public class ElizaAgentService extends Service {
         copyAssetIfPresent(assets, "agent/pglite.wasm", new File(stagingRoot, "pglite.wasm"));
         copyAssetIfPresent(assets, "agent/initdb.wasm", new File(stagingRoot, "initdb.wasm"));
         copyAssetIfPresent(assets, "agent/pglite.data", new File(stagingRoot, "pglite.data"));
-        // Legacy ONNX Runtime Web sidecars used by the removed Android Kokoro
-        // TTS path. Current AOSP TTS uses fused OmniVoice, so fresh bundles do
-        // not ship these files; keep extraction best-effort for older APKs.
-        copyAssetIfPresent(assets, "agent/ort-wasm-simd-threaded.mjs",
-            new File(stagingRoot, "ort-wasm-simd-threaded.mjs"));
-        copyAssetIfPresent(assets, "agent/ort-wasm-simd-threaded.wasm",
-            new File(stagingRoot, "ort-wasm-simd-threaded.wasm"));
         copyAssetIfPresent(assets, "agent/plugins-manifest.json",
             new File(stagingRoot, "plugins-manifest.json"));
 
@@ -1914,15 +1907,15 @@ public class ElizaAgentService extends Service {
 
     /**
      * Start the in-process bionic inference host whenever the fused native lib
-     * AND a local voice bundle (kokoro) are present — independent of the LLM
+     * AND the local Paradee voice ({@code tts/paradee/}) are present — independent of the LLM
      * runtime mode and of whether the agent process spawns fresh or adopts a
      * surviving one.
      *
      * <p>Previously the host was started ONLY inside {@link #startAgentProcess()}'s
      * fresh-spawn {@code delegateToBionicHost} block, so after a process restart
      * that adopts a surviving agent (or when the agent runs cloud-routed) the
-     * host never bound its abstract UDS, and {@code TalkMode}'s local Kokoro TTS
-     * silently fell back to the system (Google) TTS. The voice host serves Kokoro
+     * host never bound its abstract UDS, and {@code TalkMode}'s local Paradee TTS
+     * silently fell back to the system (Google) TTS. The voice host serves Paradee
      * from {@code libelizainference} + the staged bundle and needs no LLM, so its
      * lifecycle is decoupled from agent inference here.
      *
@@ -1939,8 +1932,9 @@ public class ElizaAgentService extends Service {
         if (!fusedLib.isFile() && !hasPackagedNativeLibrary("elizainference")) {
             return;
         }
-        File kokoroVoice = new File(getFilesDir(), "eliza-1/bundle/tts/kokoro");
-        if (!kokoroVoice.isDirectory()) {
+        File paradeeModel = new File(getFilesDir(), "eliza-1/bundle/"
+            + ElizaBionicInferenceServer.PARADEE_DIR + "/" + ElizaBionicInferenceServer.PARADEE_MODEL);
+        if (!paradeeModel.isFile()) {
             return;
         }
         try {
@@ -1950,7 +1944,7 @@ public class ElizaAgentService extends Service {
             host.start();
             bionicInferenceServer = host;
             Log.i(TAG, "ensureBionicVoiceHost: local voice host started"
-                + " (kokoro bundle present, independent of LLM mode)");
+                + " (Paradee voice present, independent of LLM mode)");
         } catch (Throwable t) {
             Log.w(TAG, "ensureBionicVoiceHost: could not start local voice host", t);
         }
@@ -1959,7 +1953,7 @@ public class ElizaAgentService extends Service {
     private void requestAgentStart(boolean restartFirst) {
         try { invalidateCredentialShutdown(); }
         catch (IllegalStateException retiring) { currentStatus = "stopping"; return; }
-        // Bring up the local-voice (Kokoro TTS) bionic host on every service
+        // Bring up the local-voice (Paradee TTS) bionic host on every service
         // start, before the agent-already-running guards below — so it binds
         // even when the agent is adopted rather than freshly spawned.
         ensureBionicVoiceHost();
@@ -2568,17 +2562,6 @@ public class ElizaAgentService extends Service {
                 }
                 if (!env.containsKey("ELIZA_MOBILE_LOCAL_DIRECT_REPLY")) {
                     agentEnv.put("ELIZA_MOBILE_LOCAL_DIRECT_REPLY", "1");
-                }
-                if (!env.containsKey("ELIZA_KOKORO_PREWARM")) {
-                    agentEnv.put("ELIZA_KOKORO_PREWARM", "1");
-                }
-                if (!env.containsKey("ELIZA_KOKORO_PREWARM_DELAY_MS")) {
-                    // Kokoro's first on-device ORT/WASM synthesis can be
-                    // CPU-bound for tens of seconds. Keep the warmup opt-in,
-                    // but schedule it well after the local HTTP server should
-                    // be listening so app readiness is not blocked by audio
-                    // cache priming.
-                    agentEnv.put("ELIZA_KOKORO_PREWARM_DELAY_MS", "60000");
                 }
                 // MTP (multi-token / speculative decode) is compiled into the
                 // single fused libelizainference.so (the eliza_mtp::Engine over

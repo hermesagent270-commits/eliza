@@ -92,13 +92,13 @@ it("hung receipt body respects the controlled whole-request deadline", async () 
   const timeout = vi
     .spyOn(AbortSignal, "timeout")
     .mockReturnValue(deadline.signal);
-  let bodyEntered: () => void;
+  let bodyEntered: (() => void) | undefined;
   const entered = new Promise<void>((resolve) => {
     bodyEntered = resolve;
   });
   const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
     pull() {
-      if (stream.locked) bodyEntered();
+      if (stream.locked) bodyEntered?.();
     },
   });
   vi.stubGlobal(

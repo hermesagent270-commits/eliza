@@ -153,33 +153,38 @@ async function resolveNamedContact(
     return uniqueMatch(exactName);
   }
 
-  // A whole name part is stronger evidence than a substring in another
-  // contact's name or address. Preserve ambiguity within this tier.
-  const wholeNamePattern = new RegExp(
+  // A whole name part is stronger evidence than a handle or email part.
+  // Preserve ambiguity within this tier.
+  const wholePartPattern = new RegExp(
     `(?<![\\p{L}\\p{M}\\p{N}])${escapeRegExp(needle)}(?![\\p{L}\\p{M}\\p{N}])`,
     "u",
   );
   const wholeName = relationships.filter((relationship) =>
-    wholeNamePattern.test(normalizeLookup(relationship.name)),
+    wholePartPattern.test(normalizeLookup(relationship.name)),
   );
   if (wholeName.length > 0) {
     return uniqueMatch(wholeName);
   }
 
+  // Address tiers use the same whole-part rule: a needle that appears only
+  // inside another segment of a handle or email (`anna` in
+  // `joanna.bowman@example.test`) is not the contact the caller named, and
+  // resolving it would point a durable write at a person who was never
+  // named. Full handles and emails, and handle/email segments delimited by
+  // the address separators (`.` `@` `_` `-`), still match.
   const byAddress = relationships.filter(
     (relationship) =>
-      normalizeLookup(relationship.primaryHandle).includes(needle) ||
-      normalizeLookup(relationship.email ?? "").includes(needle),
+      wholePartPattern.test(normalizeLookup(relationship.primaryHandle)) ||
+      wholePartPattern.test(normalizeLookup(relationship.email ?? "")),
   );
   if (byAddress.length > 0) {
     return uniqueMatch(byAddress);
   }
 
-  return uniqueMatch(
-    relationships.filter((relationship) =>
-      normalizeLookup(relationship.name).includes(needle),
-    ),
-  );
+  // The name tiers above are exhaustive for boundary-respecting name
+  // matches: a needle that is not a whole name part in any contact's name
+  // is unmatched input, never a raw-substring guess.
+  return { kind: "unmatched" };
 }
 
 async function resolveRelationshipIdFromText(

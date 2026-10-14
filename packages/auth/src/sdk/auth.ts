@@ -88,7 +88,14 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
       base64.length + ((4 - (base64.length % 4)) % 4),
       "=",
     );
-    const json = atob(padded);
+    // `atob` yields one char per BYTE (latin1). JWT payloads are UTF-8 JSON
+    // (RFC 7519 §3), so parse the bytes through a UTF-8 decode — feeding the
+    // byte string straight to JSON.parse mojibakes any non-ASCII claim
+    // ("josé" → "josÃ©"). `fatal: true` makes non-UTF-8 bytes throw, which
+    // the catch maps to null for malformed tokens. Mirrors the canonical
+    // decoder in packages/ui/src/cloud/lib/jwt.ts.
+    const bytes = Uint8Array.from(atob(padded), (ch) => ch.charCodeAt(0));
+    const json = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     return JSON.parse(json) as Record<string, unknown>;
   } catch {
     return null;

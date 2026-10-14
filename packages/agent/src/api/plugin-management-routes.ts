@@ -27,6 +27,7 @@ import {
 } from "../runtime/core-plugins.ts";
 import { getAgentHostBridge } from "../runtime/host-bridge.ts";
 import { removeClearedCredentialsFromVault } from "../runtime/operations/vault-bridge.ts";
+import { replaceConfigInPlace } from "./config-state.ts";
 import {
   aggregateSecrets,
   isBlockedEnvKey,
@@ -268,7 +269,9 @@ async function persistMutation(
     ctx.error(ctx.res, "Plugin is controlled by the development launcher", 409);
     return;
   }
-  const previousConfig = ctx.state.config;
+  // Snapshot: the in-place replace below also rewrites the live object, and
+  // the runtime apply compares this config with the next one.
+  const previousConfig = structuredClone(ctx.state.config);
   const nextConfig = structuredClone(previousConfig);
   const entry = canonicalEntry(nextConfig, plugin);
   for (const [key, value] of Object.entries(values)) {
@@ -279,7 +282,9 @@ async function persistMutation(
   if (enabled !== undefined) toggle(nextConfig, plugin.id, npmName, enabled);
   // Persistence failure must leave the live configuration untouched and fail the request.
   saveElizaConfig(nextConfig);
-  ctx.state.config = nextConfig;
+  // Update the live object in place: a concurrent PUT /api/config holds this
+  // reference across its body read and would otherwise save a stale copy.
+  replaceConfigInPlace(ctx.state.config, nextConfig);
   clearProcessEnv(values);
   await clearVaultCredentials(values);
   for (const param of plugin.parameters) {
@@ -456,7 +461,7 @@ async function dispatchPluginManagementRoutes(
         error(res, rejection, 422);
         return;
       }
-      const previousConfig = ctx.state.config;
+      const previousConfig = structuredClone(ctx.state.config);
       const next = structuredClone(previousConfig);
       next.plugins ??= {};
       next.plugins.entries ??= {};
@@ -470,7 +475,7 @@ async function dispatchPluginManagementRoutes(
         }
       }
       saveElizaConfig(next);
-      ctx.state.config = next;
+      replaceConfigInPlace(ctx.state.config, next);
       clearProcessEnv(values);
       await clearVaultCredentials(values);
       for (const [key, value] of Object.entries(values))

@@ -4,8 +4,8 @@
  * was listed, so a client can see that the mailbox changed between pages.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { fetchManagedGoogleGmailSearch } from "./gmail";
-import { managedGoogleConnectorDeps } from "./shared";
+import { fetchManagedGoogleGmailSearch, readManagedGoogleGmailMessage } from "./gmail";
+import { AgentGoogleConnectorError, managedGoogleConnectorDeps } from "./shared";
 
 const savedFetch = globalThis.fetch;
 const savedDeps = { ...managedGoogleConnectorDeps };
@@ -25,9 +25,31 @@ const SEARCH = {
 
 let mailboxHistoryId: unknown;
 let requests: string[];
+let connectionStatus = "active",
+  connectionId = "conn-1",
+  partStatus = 200,
+  invalidPart = false;
+let fullReadReached: (() => void) | null = null,
+  finishFullRead: (() => void) | null = null;
+let tokenReads = 0,
+  authFailure: AgentGoogleConnectorError | null = null;
+
+function message(id: string) {
+  return {
+    id,
+    threadId: `thread-${id}`,
+    labelIds: ["INBOX"],
+    internalDate: "1767225600000",
+    payload: {
+      mimeType: "text/html",
+      headers: [{ name: "Subject", value: `Subject ${id}` }],
+      body: { data: Buffer.from("<p>Owned HTML body</p>").toString("base64url") },
+    },
+  };
+}
 
 function installGmail(pages: Record<string, { ids: string[]; next?: string }>) {
-  globalThis.fetch = mock(async (input: Parameters<typeof fetch>[0]) => {
+  globalThis.fetch = mock(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = new URL(String(input));
     requests.push(url.pathname);
     if (url.pathname.endsWith("/profile")) return Response.json({ historyId: mailboxHistoryId });
@@ -38,34 +60,65 @@ function installGmail(pages: Record<string, { ids: string[]; next?: string }>) {
         ...(page.next ? { nextPageToken: page.next } : {}),
       });
     }
+    if (url.pathname === "/batch") {
+      const ids = [
+        ...String(init?.body).matchAll(/GET \/gmail\/v1\/users\/me\/messages\/([^?]+)\?/g),
+      ].map((row) => decodeURIComponent(row[1]));
+      const parts = ids.map(
+        (id, index) =>
+          `--batch_owned\r\nContent-Type: application/http\r\nContent-ID: <response-alpha-${index}>\r\n\r\nHTTP/1.1 ${partStatus} OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(invalidPart ? { id: null } : message(id))}\r\n`,
+      );
+      return new Response(parts.join("") + "--batch_owned--\r\n", {
+        headers: { "Content-Type": "multipart/mixed; boundary=batch_owned" },
+      });
+    }
+    if (url.searchParams.get("format") === "full" && fullReadReached) {
+      const reached = fullReadReached;
+      fullReadReached = null;
+      await new Promise<void>((resolve) => {
+        finishFullRead = resolve;
+        reached();
+      });
+    }
     const id = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
-    return Response.json({
-      id,
-      threadId: `thread-${id}`,
-      labelIds: ["INBOX"],
-      internalDate: "1767225600000",
-      payload: { headers: [{ name: "Subject", value: `Subject ${id}` }] },
-    });
+    return Response.json(message(id));
   }) as unknown as typeof fetch;
 }
 
 beforeEach(() => {
   requests = [];
+  connectionStatus = "active";
+  connectionId = "conn-1";
+  partStatus = 200;
+  invalidPart = false;
+  fullReadReached = null;
+  finishFullRead = null;
+  tokenReads = 0;
+  authFailure = null;
   process.env.GOOGLE_CLIENT_ID = "client-id";
   process.env.GOOGLE_CLIENT_SECRET = "client-secret";
   managedGoogleConnectorDeps.oauthService = {
     ...savedDeps.oauthService,
     listConnections: async () => [
       {
-        id: "conn-1",
-        status: "active",
+        id: connectionId,
+        userId: "user-1",
+        connectionRole: "owner",
+        status: connectionStatus,
         platformUserId: "google-user",
         email: "owner@example.com",
         scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
         linkedAt: new Date(0),
       },
     ],
-    getValidToken: async () => ({ accessToken: "test-token" }),
+    getValidToken: async () => {
+      if (++tokenReads === 3 && authFailure) throw authFailure;
+      return { accessToken: "test-token" };
+    },
+    getValidTokenByPlatformWithConnectionId: async () => ({
+      connectionId,
+      token: { accessToken: "test-token" },
+    }),
   } as unknown as typeof savedDeps.oauthService;
   managedGoogleConnectorDeps.dbRead = {
     select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
@@ -100,4 +153,73 @@ describe("fetchManagedGoogleGmailSearch mailbox revision", () => {
     expect(second.mailboxHistoryId).toBe("1001");
     expect(second.mailboxHistoryId).not.toBe(first.mailboxHistoryId);
   });
+});
+
+describe("Gmail reading failure and authority boundaries", () => {
+  for (const status of [403, 429])
+    test(`outer 200 with inner ${status} remains a typed provider 502`, async () => {
+      installGmail({ "": { ids: ["m1"] } });
+      mailboxHistoryId = "1000";
+      partStatus = status;
+      try {
+        await fetchManagedGoogleGmailSearch(SEARCH);
+        throw Error("Expected rejection");
+      } catch (error) {
+        expect(error).toBeInstanceOf(AgentGoogleConnectorError);
+        expect((error as AgentGoogleConnectorError).status).toBe(502);
+      }
+    });
+  test("invalid batch payload remains typed 502", async () => {
+    installGmail({ "": { ids: ["m1"] } });
+    mailboxHistoryId = "1000";
+    invalidPart = true;
+    try {
+      await fetchManagedGoogleGmailSearch(SEARCH);
+      throw Error("Expected rejection");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AgentGoogleConnectorError);
+      expect((error as AgentGoogleConnectorError).status).toBe(502);
+    }
+  });
+  test("typed auth failure at batch token lookup retains its original status and identity", async () => {
+    installGmail({ "": { ids: ["m1"] } });
+    mailboxHistoryId = "1000";
+    authFailure = new AgentGoogleConnectorError(401, "Owned authentication failure");
+    try {
+      await fetchManagedGoogleGmailSearch(SEARCH);
+      throw Error("Expected rejection");
+    } catch (error) {
+      expect(error).toBe(authFailure);
+      expect((error as AgentGoogleConnectorError).status).toBe(401);
+    }
+  });
+  for (const change of ["disconnect", "replacement"] as const)
+    test(`full read refuses ${change} during await before returning HTML or text`, async () => {
+      installGmail({ "": { ids: ["m1"] } });
+      mailboxHistoryId = "1000";
+      const reached = new Promise<void>((resolve) => {
+        fullReadReached = resolve;
+      });
+      const read = readManagedGoogleGmailMessage({
+        organizationId: SEARCH.organizationId,
+        userId: SEARCH.userId,
+        side: SEARCH.side,
+        ...(change === "disconnect" ? { grantId: SEARCH.grantId } : {}),
+        messageId: "m1",
+      });
+      const outcome = read.then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+      await reached;
+      if (change === "disconnect") connectionStatus = "revoked";
+      else connectionId = "conn-replacement";
+      finishFullRead!();
+      const result = await outcome;
+      expect("value" in result).toBe(false);
+      if ("error" in result) {
+        expect(result.error).toBeInstanceOf(AgentGoogleConnectorError);
+        expect(result.error.status).toBe(409);
+      }
+    });
 });

@@ -1521,6 +1521,66 @@ describe("planner-loop death after a completed tool", () => {
     expect(harness.reportedScopes).not.toContain("MessageService.plannerLoop");
   });
 
+  it("never stores or sends a plain reply when Stop lands during its egress hooks", async () => {
+    let announce!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      announce = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness = await createHarness({ actionResult: { success: true } });
+    // Stage 1 answers directly: no tool, no planner.
+    const stageOne = stageOneToolTurn();
+    stageOne.toolCalls[0].arguments.candidateActionNames = [];
+    stageOne.toolCalls[0].arguments.requiresTool = false;
+    stageOne.toolCalls[0].arguments.replyText =
+      "The capital of France is Paris.";
+    harness.runtime.registerModel(
+      ModelType.RESPONSE_HANDLER,
+      async () => stageOne,
+      "stop-test",
+      200,
+    );
+    // The Stop arrives while an outgoing hook holds the reply, after the
+    // model answered and before anything is stored or sent.
+    harness.runtime.registerPipelineHook({
+      id: "stop-test-hold-egress",
+      phase: "outgoing_before_deliver",
+      handler: async () => {
+        announce();
+        await gate;
+      },
+    });
+    const pending = new DefaultMessageService().handleMessage(
+      harness.runtime,
+      makeMessage(harness.runtime, "what is the capital of France?"),
+      harness.callback,
+    );
+    const rejection = expect(pending).rejects.toMatchObject({
+      code: "TURN_ABORTED",
+    });
+    await entered;
+    const [roomId] = harness.runtime.turnControllers.activeRoomIds();
+    expect(roomId).toBeDefined();
+    expect(
+      harness.runtime.turnControllers.abortTurn(roomId, "ui-chat-stop"),
+    ).toBe(true);
+    release();
+    await rejection;
+    expect(visibleTexts(harness.callbacks)).toEqual([]);
+    expect(visibleTexts(harness.sent)).toEqual([]);
+    const stored = await harness.runtime.getMemories({
+      roomId: harness.runtime.agentId,
+      tableName: "messages",
+      count: 20,
+    });
+    expect(
+      stored.filter((memory) => memory.entityId === harness.runtime.agentId),
+    ).toEqual([]);
+  });
+
   it("preserves partial settlements when an explicit tool-call budget stops a batch", async () => {
     const savedItems: number[] = [];
     let apologyCalls = 0;

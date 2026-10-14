@@ -13,7 +13,7 @@ import type {
 } from "../../../types/social-media";
 import { extractErrorMessage } from "../../../utils/error-handling";
 import { logger } from "../../../utils/logger";
-import { withRetry } from "../rate-limit";
+import { type RetryOptions, withRetry } from "../rate-limit";
 
 const REDDIT_API_BASE = "https://oauth.reddit.com";
 const REDDIT_AUTH_BASE = "https://www.reddit.com/api/v1";
@@ -104,6 +104,7 @@ async function redditApiRequest<T>(
   endpoint: string,
   accessToken: string,
   options: RequestInit = {},
+  retry: Pick<RetryOptions, "replayUnknownOutcome"> = {},
 ): Promise<T> {
   const url = endpoint.startsWith("http") ? endpoint : `${REDDIT_API_BASE}${endpoint}`;
 
@@ -126,7 +127,7 @@ async function redditApiRequest<T>(
       if (json.error) throw new Error(json.error_description || json.error);
       return json;
     },
-    { platform: "reddit", maxRetries: 3 },
+    { platform: "reddit", maxRetries: 3, ...retry },
   );
 
   return data;
@@ -270,10 +271,16 @@ export const redditProvider: SocialMediaProvider = {
           data?: { id: string; name: string; url: string };
           errors?: string[][];
         };
-      }>("/api/submit", accessToken, {
-        method: "POST",
-        body: params,
-      });
+      }>(
+        "/api/submit",
+        accessToken,
+        {
+          method: "POST",
+          body: params,
+        },
+        // A replay after a timeout or a 5xx posts the submission twice.
+        { replayUnknownOutcome: false },
+      );
 
       if (response.json.errors?.length) {
         const errorMessage = response.json.errors.map((e) => e.join(": ")).join(", ");

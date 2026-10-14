@@ -35,7 +35,8 @@ export type VoiceModelId =
   | "vad"
   | "wakeword"
   | "embedding"
-  | "asr";
+  | "asr"
+  | "mobile-voice";
 
 /**
  * Quant labels mirror `CatalogQuantizationVariant` ids used by the text
@@ -162,6 +163,133 @@ export interface VoiceModelVersion {
   readonly changelogEntry: string;
   /** Minimum `eliza1Manifest.version` this voice version is compatible with. */
   readonly minBundleVersion: string;
+  /**
+   * Per-file pins for a multi-repo bundle (`mobile-voice` only). The files
+   * come from several Hugging Face repos, so each row carries its own
+   * repository, revision and URL instead of the version-level `hfRepo`.
+   */
+  readonly files?: ReadonlyArray<MobileVoiceFile>;
+}
+
+/** What a mobile voice bundle file is for. */
+export type MobileVoiceFileRole =
+  | "tts"
+  | "g2p-lexicon"
+  | "asr-parakeet"
+  | "asr-text"
+  | "asr-mmproj"
+  | "vad";
+
+/**
+ * Which libelizainference ASR backend an `asr/` row feeds. `parakeet` is the
+ * Parakeet-TDT backend (Phonon-2, batch and streaming); `qwen3` is the
+ * Qwen3-ASR text + mmproj pair on mtmd. `asr/` holds one backend's files at a
+ * time: the fused library picks parakeet when it finds a parakeet-tdt GGUF
+ * there, and the Qwen3 picker needs exactly one text GGUF beside the mmproj.
+ */
+export type MobileAsrBackend = "parakeet" | "qwen3";
+
+/** The mobile default: Phonon-2 on the parakeet backend. */
+export const DEFAULT_MOBILE_ASR_BACKEND: MobileAsrBackend = "parakeet";
+
+/**
+ * Resolve the ASR backend to stage from `ELIZA_ASR_BACKEND`, the same variable
+ * the fused library reads (`parakeet`, `qwen3`, or its `mtmd` alias for
+ * qwen3). Unset, empty, `auto` or an unknown value give the default.
+ */
+export function mobileAsrBackend(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): MobileAsrBackend {
+  const value = env.ELIZA_ASR_BACKEND?.trim().toLowerCase();
+  if (value === "qwen3" || value === "mtmd") return "qwen3";
+  return DEFAULT_MOBILE_ASR_BACKEND;
+}
+
+/** Roles that make up the `asr/` group for a backend. */
+export function mobileAsrRoles(
+  backend: MobileAsrBackend,
+): ReadonlyArray<MobileVoiceFileRole> {
+  return backend === "qwen3" ? ["asr-text", "asr-mmproj"] : ["asr-parakeet"];
+}
+
+/**
+ * One pinned file of the Android/AOSP voice bundle. `path` is relative to the
+ * bundle root the agent stages into (`tts/paradee/`, `asr/`, `vad/`).
+ *
+ * A `published` row has a resolvable `url`, `revision`, `sha256` and `bytes`.
+ * An `unpublished` row has no `url` or `revision`: the file is built locally
+ * from the pinned `source` (see `localFrom`) and must be supplied by path
+ * until the owner publishes it. Downloaders never fetch an unpublished row.
+ * When the build is byte-reproducible (Phonon-2) the row still carries the
+ * expected `sha256` and `bytes`, and a local copy must match them; otherwise
+ * they are null and the pins come with the local source.
+ */
+export interface MobileVoiceFile {
+  readonly id: string;
+  readonly role: MobileVoiceFileRole;
+  /** For `asr-*` rows: the backend this file belongs to. */
+  readonly asrBackend?: MobileAsrBackend;
+  readonly path: string;
+  readonly hfRepo: string;
+  readonly hfPath: string;
+  readonly url: string | null;
+  readonly revision: string | null;
+  readonly sha256: string | null;
+  readonly bytes: number | null;
+  readonly license: string;
+  readonly status: "published" | "unpublished";
+  readonly localFrom?: string;
+  /** Attribution text the app must show for this file (CC-BY rows). */
+  readonly attribution?: string;
+  /** Licence NOTICE that must ship with the file, pinned in the source repo. */
+  readonly notice?: {
+    readonly path: string;
+    readonly sha256: string;
+    readonly bytes: number;
+    /** GGUF metadata key that carries the same NOTICE text. */
+    readonly ggufKey?: string;
+  };
+  /** Licence points flagged for review. They never block a build. */
+  readonly licenseFlags?: ReadonlyArray<string>;
+  readonly source: {
+    readonly repo: string;
+    readonly revision: string;
+    readonly files?: ReadonlyArray<{
+      readonly path: string;
+      readonly sha256: string;
+      readonly bytes?: number;
+    }>;
+    readonly converter?: string;
+    /** Exact converter invocation that reproduces `sha256` from `files`. */
+    readonly converterCommand?: string;
+  };
+}
+
+/** A mobile voice file that is safe to download: every pin is present. */
+export type PublishedMobileVoiceFile = MobileVoiceFile & {
+  readonly status: "published";
+  readonly url: string;
+  readonly revision: string;
+  readonly sha256: string;
+  readonly bytes: number;
+};
+
+export function isPublishedMobileVoiceFile(
+  file: MobileVoiceFile,
+): file is PublishedMobileVoiceFile {
+  return (
+    file.status === "published" &&
+    typeof file.url === "string" &&
+    typeof file.revision === "string" &&
+    file.url.startsWith(
+      `https://huggingface.co/${file.hfRepo}/resolve/${file.revision}/`,
+    ) &&
+    typeof file.sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(file.sha256) &&
+    typeof file.bytes === "number" &&
+    Number.isSafeInteger(file.bytes) &&
+    file.bytes > 0
+  );
 }
 
 /**
@@ -265,4 +393,22 @@ export function findVoiceModelVersion(
   version: string,
 ): VoiceModelVersion | undefined {
   return VOICE_MODEL_VERSIONS.find((v) => v.id === id && v.version === version);
+}
+
+/**
+ * The pinned Android/AOSP voice bundle (Paradee TTS + misaki lexicon,
+ * Phonon-2 ASR with the Qwen3-ASR pair as the selectable alternative, Silero
+ * VAD). Throws when the catalog has no `mobile-voice`
+ * entry with file rows, so a broken catalog cannot silently ship no voice.
+ */
+export function mobileVoiceBundle(): VoiceModelVersion & {
+  readonly files: ReadonlyArray<MobileVoiceFile>;
+} {
+  const latest = latestVoiceModelVersion("mobile-voice");
+  if (!latest?.files?.length) {
+    throw new Error("voice-model-versions.json has no mobile-voice file rows");
+  }
+  return latest as VoiceModelVersion & {
+    readonly files: ReadonlyArray<MobileVoiceFile>;
+  };
 }

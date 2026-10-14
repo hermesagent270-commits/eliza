@@ -8,7 +8,10 @@ import { and, asc, eq, isNull, like, notInArray, or, sql } from "drizzle-orm";
 import type { DbTransaction } from "../../db/client";
 import { dbWrite, writeTransaction } from "../../db/helpers";
 import { readPostLockDatabaseNow } from "../../db/repositories/primary-database-clock";
-import { subscriptionAllowanceRepository } from "../../db/repositories/subscription-allowance";
+import {
+  type AllowanceFundingAuthority,
+  subscriptionAllowanceRepository,
+} from "../../db/repositories/subscription-allowance";
 import { readEligibleSubscriptionAllowance } from "../../db/repositories/subscription-allowance-eligibility";
 import {
   type CanonicalMoney,
@@ -126,6 +129,8 @@ export interface SubscriptionFundingReservationResult {
 
 export interface TransactionalFundingReservationResult
   extends SubscriptionFundingReservationResult {
+  /** Rows created and locked by the allowance owner in this transaction. */
+  allowanceAuthority?: AllowanceFundingAuthority;
   /** The transaction owner must invalidate credit caches after committing this debit. */
   purchasedCreditDebited: boolean;
 }
@@ -480,23 +485,27 @@ export class SubscriptionFundingService {
     };
     // The caller's deadline is persisted on every reservation; the allowance
     // period expiry only limits new allowance spending.
-    const authority =
+    const allowanceAuthority =
       period && allowance > 0n
         ? await subscriptionAllowanceRepository.reserve(tx, {
             ...common,
             periodId: period.id,
             expiresAt,
           })
-        : await subscriptionFundingReservationsRepository.createPrerequisite(tx, {
-            ...common,
-            fundingClass,
-            allowancePeriodId: null,
-            expiresAt,
-          });
+        : undefined;
+    const authority =
+      allowanceAuthority ??
+      (await subscriptionFundingReservationsRepository.createPrerequisite(tx, {
+        ...common,
+        fundingClass,
+        allowancePeriodId: null,
+        expiresAt,
+      }));
     return {
       reservation: authority.reservation,
       replayed: authority.replayed,
       purchasedCreditDebited: purchasedDebit && !authority.replayed,
+      ...(allowanceAuthority && { allowanceAuthority }),
     };
   }
 
@@ -518,11 +527,13 @@ export class SubscriptionFundingService {
   /**
    * Settles a pinned reservation in the caller's work-completion transaction.
    * The caller takes workload locks first and invalidates credit caches only
-   * after commit when purchasedCreditRefunded is true.
+   * after commit when purchasedCreditRefunded is true. The optional authority
+   * comes from the immediately preceding reserve in this same transaction.
    */
   async settleInTransaction(
     tx: DbTransaction,
     input: SettleSubscriptionFundingInput,
+    authority?: AllowanceFundingAuthority,
   ): Promise<SubscriptionFundingSettlementResult & { purchasedCreditRefunded: boolean }> {
     validateOperationId(input.logicalOperationId);
     const actualAmount = canonicalMoney(input.actualAmount, "actualAmount", true);
@@ -535,9 +546,21 @@ export class SubscriptionFundingService {
       input.occurredAt.toISOString(),
     ]);
     let purchasedMutation = false;
-    await lockOrganization(tx, input.organizationId);
+    if (authority) {
+      subscriptionAllowanceRepository.assertLockedAuthority(tx, input.organizationId, authority);
+      if (authority.reservation.logical_operation_id !== input.logicalOperationId)
+        fundingError(
+          SUBSCRIPTION_FUNDING_REPLAY_CONFLICT,
+          "Funding authority belongs to another operation",
+          { organizationId: input.organizationId },
+        );
+    } else {
+      await lockOrganization(tx, input.organizationId);
+    }
     const now = await readPostLockDatabaseNow(tx);
-    const reservation = await findReservation(tx, input.organizationId, input.logicalOperationId);
+    const reservation =
+      authority?.reservation ??
+      (await findReservation(tx, input.organizationId, input.logicalOperationId));
     if (reservation.funding_class !== SUBSCRIPTION_FUNDING_CLASS_BY_OPERATION[input.operation]) {
       fundingError(
         SUBSCRIPTION_FUNDING_REPLAY_CONFLICT,
@@ -545,11 +568,13 @@ export class SubscriptionFundingService {
         { logicalOperationId: input.logicalOperationId },
       );
     }
-    const locked = await subscriptionFundingReservationsRepository.lockById(
-      tx,
-      input.organizationId,
-      reservation.id,
-    );
+    const locked =
+      authority ??
+      (await subscriptionFundingReservationsRepository.lockById(
+        tx,
+        input.organizationId,
+        reservation.id,
+      ));
     const allowanceAllocation = locked.allocations.find((row) => row.source === "allowance");
     const purchasedAllocation = locked.allocations.find((row) => row.source === "purchased_credit");
     const allowanceReserved = allowanceAllocation
@@ -613,7 +638,7 @@ export class SubscriptionFundingService {
       });
     };
     if (allowanceAllocation) {
-      const terminal = await subscriptionAllowanceRepository.finalize(tx, terminalInput);
+      const terminal = await subscriptionAllowanceRepository.finalize(tx, terminalInput, authority);
       await enqueuePayout(terminal.replayed);
       return {
         reservation: terminal.reservation,

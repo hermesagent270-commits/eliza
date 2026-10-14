@@ -6995,11 +6995,14 @@ async function patchConversation(
     return true;
   }
   const body = parsedPatch.data;
+  // A title or metadata change is persisted on the conversation's room, so it
+  // needs the runtime: changing only the in-process record would show the
+  // new value until the next restart and then serve the old one.
+  if (!state.runtime) {
+    error(res, "Agent is not running", 503);
+    return true;
+  }
   if (body.generate) {
-    if (!state.runtime) {
-      error(res, "Agent is not running", 503);
-      return true;
-    }
     // Get the last user message to use as the prompt for generation
     let prompt = "A generic conversation";
     const memories = await state.runtime.getMemories({
@@ -7165,6 +7168,13 @@ async function deleteConversation(
   if (convId === null) return true;
   const conv = await getConversationWithRestore(state, convId);
   const runtime = state.runtime;
+  if (conv?.roomId && !runtime) {
+    // The room and its messages can only be deleted through the runtime. A
+    // tombstone without that deletion would hide the conversation until the
+    // tombstone expires and keep its messages in search and the memory feed.
+    error(res, "Agent is not running", 503);
+    return true;
+  }
   if (conv?.roomId && runtime) {
     const deleteConversationAbortTracker = createRequestDisconnectAbortTracker({
       req,

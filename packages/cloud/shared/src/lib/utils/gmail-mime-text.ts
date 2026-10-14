@@ -239,7 +239,32 @@ export function gmailHasAttachmentsHint(payload: GmailPayloadPart | null | undef
   return found;
 }
 
-/** Gmail's list API omits Trash unless includeSpamTrash is set; only an explicit in:trash query sets it. */
+/** Gmail's list API omits Trash unless includeSpamTrash is set; explicit Spam, Trash or anywhere queries enable excluded locations. */
 export function gmailSearchIncludesTrash(query: string | undefined): boolean {
-  return typeof query === "string" && /(?:^|\s)in:trash(?=\s|$)/i.test(query);
+  return (
+    typeof query === "string" && /(?:^|[\s({])in:(?:spam|trash|anywhere)(?=[\s)}]|$)/i.test(query)
+  );
+}
+
+/** Human HTML view is complete or explicitly unavailable; never a partial MIME body. */
+export function extractGmailHtmlView(payload: GmailPayloadPart | null | undefined): {
+  html: string | null;
+  status: "available" | "none" | "too-large";
+} {
+  const pending: GmailPayloadPart[] = payload ? [payload] : [];
+  let visited = 0;
+  while (pending.length) {
+    if (++visited > MAX_GMAIL_MIME_NODES) return { html: null, status: "too-large" };
+    const part = pending.pop()!;
+    if (part.filename || part.mimeType?.toLowerCase() === "message/rfc822") continue;
+    if (part.mimeType?.toLowerCase() === "text/html" && typeof part.body?.data === "string") {
+      if (part.body.data.length > 750000) return { html: null, status: "too-large" };
+      const html = decodeGmailPart(part);
+      return new TextEncoder().encode(html).length <= 512 * 1024
+        ? { html, status: "available" }
+        : { html: null, status: "too-large" };
+    }
+    for (const child of [...(part.parts ?? [])].reverse()) pending.push(child);
+  }
+  return { html: null, status: "none" };
 }

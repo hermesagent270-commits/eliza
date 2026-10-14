@@ -144,7 +144,10 @@ vi.mock("../services/voice", async () => {
 	const codec = await vi.importActual<
 		typeof import("../services/voice/wav-codec")
 	>("../services/voice/wav-codec");
-	return { decodeMonoPcm16Wav: vi.fn(codec.decodeMonoPcm16Wav) };
+	return {
+		decodeMonoPcm16Wav: vi.fn(codec.decodeMonoPcm16Wav),
+		encodeMonoPcm16Wav: codec.encodeMonoPcm16Wav,
+	};
 });
 
 import { resolveLocalInferenceLoadArgs } from "../services/active-model";
@@ -1054,6 +1057,37 @@ describe("ensureLocalInferenceHandler", () => {
 			}),
 		);
 	});
+});
+
+it("routes bionic-delegated TEXT_TO_SPEECH to the host's Paradee op and returns WAV", async () => {
+	vi.stubEnv("ELIZA_BIONIC_HOST_DELEGATED", "1");
+	vi.stubEnv("ELIZA_BIONIC_INFERENCE_SOCK", `bionic-tts-test-${process.pid}`);
+	const synthesize = vi
+		.spyOn(BionicHostLoader.prototype, "synthesize")
+		.mockResolvedValue({
+			pcm: new Float32Array([0, 0.5, -0.5]),
+			sampleRate: 24000,
+		});
+	try {
+		const { runtime, registrations } = makeRuntime();
+		await ensureLocalInferenceHandler(runtime);
+		await runtime.getServiceLoadPromise("localInferenceLoader");
+		const handler = findRegisteredHandler(
+			registrations,
+			ModelType.TEXT_TO_SPEECH,
+		);
+		const wav = (await handler(runtime, { text: " Hello. " })) as Uint8Array;
+		expect(synthesize).toHaveBeenCalledWith({
+			text: "Hello.",
+			signal: undefined,
+		});
+		expect(engineState.synthesizeSpeech).not.toHaveBeenCalled();
+		const decoded = decodeMonoPcm16Wav(wav);
+		expect(decoded.sampleRate).toBe(24000);
+		expect(decoded.pcm.length).toBe(3);
+	} finally {
+		synthesize.mockRestore();
+	}
 });
 
 it("does not unload the chat assignment when a dedicated embedding assignment is invalid", async () => {

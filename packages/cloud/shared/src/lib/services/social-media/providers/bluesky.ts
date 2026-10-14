@@ -19,7 +19,7 @@ import {
   decodeSocialMediaBase64,
   downloadSocialMediaBytes,
 } from "../media-download";
-import { withRetry } from "../rate-limit";
+import { type RetryOptions, withRetry } from "../rate-limit";
 
 const BLUESKY_SERVICE = "https://bsky.social";
 
@@ -89,6 +89,7 @@ async function bskyApiRequest<T>(
   endpoint: string,
   accessJwt: string,
   options: RequestInit = {},
+  retry: Pick<RetryOptions, "replayUnknownOutcome"> = {},
 ): Promise<T> {
   const { data } = await withRetry<T>(
     () =>
@@ -105,7 +106,7 @@ async function bskyApiRequest<T>(
       if (json.error) throw new Error(json.message || json.error);
       return json;
     },
-    { platform: "bluesky", maxRetries: 3 },
+    { platform: "bluesky", maxRetries: 3, ...retry },
   );
   return data;
 }
@@ -382,6 +383,7 @@ export const blueskyProvider: SocialMediaProvider = {
             record,
           }),
         },
+        { replayUnknownOutcome: false },
       );
 
       // Extract rkey from URI for URL
@@ -605,6 +607,7 @@ export const blueskyProvider: SocialMediaProvider = {
             },
           }),
         },
+        { replayUnknownOutcome: false },
       );
 
       return {

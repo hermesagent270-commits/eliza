@@ -1487,6 +1487,7 @@ export async function handleChatCompletionsPOST(
             executionCtx: options.executionCtx,
             config: inferenceRateLimitConfig(admissionSnapshot, "completions"),
             apiKeyId: apiKey?.id,
+            userId: user.id,
           })
         : Promise.resolve(null),
     );

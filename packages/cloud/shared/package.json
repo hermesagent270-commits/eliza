@@ -444,6 +444,8 @@
     "./lib/services/managed-discord-guild-voice": "./src/lib/services/managed-discord-guild-voice.ts",
     "./lib/services/managed-domains": "./src/lib/services/managed-domains.ts",
     "./lib/services/managed-eliza-config": "./src/lib/services/managed-eliza-config.ts",
+    "./lib/services/maps/contract": "./src/lib/services/maps/contract.ts",
+    "./lib/services/maps/osm-provider": "./src/lib/services/maps/osm-provider.ts",
     "./lib/services/market-preview": "./src/lib/services/market-preview.ts",
     "./lib/services/message-router": "./src/lib/services/message-router.ts",
     "./lib/services/mobile-app-auth": "./src/lib/services/mobile-app-auth.ts",

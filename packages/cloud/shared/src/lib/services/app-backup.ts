@@ -17,6 +17,7 @@ import { logger } from "../utils/logger";
 import { parseAppMonetizationNumber } from "./app-credit-math";
 import { appCreditsService } from "./app-credits";
 import { appsService } from "./apps";
+import { charactersService } from "./characters";
 
 export const APP_BACKUP_VERSION = 1 as const;
 
@@ -133,8 +134,24 @@ export class AppBackupService {
       contact_email: backup.app.contact_email ?? undefined,
     });
 
+    // Linked characters follow the same rule as PUT /apps/:id/characters: the
+    // restoring user owns them or they are public. Others are dropped, not
+    // trusted from the client-supplied blob.
+    const linkedCharacterIds: string[] = [];
+    for (const characterId of backup.app.linked_character_ids ?? []) {
+      const character = await charactersService.getByIdForAccessCheck(characterId);
+      if (!character) {
+        warnings.push(`Linked character ${characterId} was not restored: it no longer exists.`);
+      } else if (charactersService.isLinkedCharacterVisible(character, { userId })) {
+        linkedCharacterIds.push(characterId);
+      } else {
+        warnings.push(
+          `Linked character ${characterId} was not restored: it is not yours and not public.`,
+        );
+      }
+    }
     await appsService.update(created.app.id, {
-      linked_character_ids: backup.app.linked_character_ids ?? [],
+      linked_character_ids: linkedCharacterIds,
       discord_automation: backup.automation?.discord ?? null,
       telegram_automation: backup.automation?.telegram ?? null,
       twitter_automation: backup.automation?.twitter ?? null,

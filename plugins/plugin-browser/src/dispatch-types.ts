@@ -108,6 +108,7 @@ const IDEMPOTENT_SUBACTIONS: ReadonlySet<BrowserWorkspaceSubaction> = new Set([
   "errors",
   "network",
   "diff",
+  "wait",
 ]);
 
 /**
@@ -119,6 +120,10 @@ const IDEMPOTENT_SUBACTIONS: ReadonlySet<BrowserWorkspaceSubaction> = new Set([
  */
 export function isIdempotentBrowserSubaction(
   subaction: BrowserWorkspaceSubaction,
+  options?: { script?: string },
 ): boolean {
+  if (subaction === "wait" && options?.script?.trim()) {
+    return false;
+  }
   return IDEMPOTENT_SUBACTIONS.has(subaction);
 }

@@ -3592,6 +3592,13 @@
       "when": 1796083200160,
       "tag": "0542_subscription_grant_codes",
       "breakpoints": true
+    },
+    {
+      "idx": 513,
+      "version": "7",
+      "when": 1796083200161,
+      "tag": "0543_app_pilot_allowance",
+      "breakpoints": true
     }
   ]
 }

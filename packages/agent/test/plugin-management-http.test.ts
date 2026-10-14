@@ -1,6 +1,7 @@
 /** Real host HTTP and on-disk config acceptance; no mocked route/persistence services. */
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -549,3 +550,50 @@ it("executes narrow promoted plugin schemas through authenticated HTTP without c
     await fixture.cleanup();
   }
 }, 120_000);
+
+it("keeps a plugin save made while a settings save is still sending its body", async () => {
+  const configPath = path.join(directory, "eliza.json");
+  const pluginKey = "sk-synthetic-overlapping-plugin-save-not-real";
+  // A settings save whose body is still arriving when the plugin save runs.
+  const body = JSON.stringify({ ui: { theme: "dark" } });
+  const settings = new Promise<number>((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: server.port,
+        path: "/api/config",
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          "x-forwarded-for": "203.0.113.10",
+          Authorization: `Bearer ${token}`,
+        },
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode ?? 0));
+      },
+    );
+    req.on("error", reject);
+    req.write(body.slice(0, 5));
+    setTimeout(async () => {
+      const plugin = await request("/api/plugins/openai", "PUT", {
+        config: { OPENAI_API_KEY: pluginKey },
+      });
+      expect(plugin.status, await plugin.clone().text()).toBe(200);
+      req.end(body.slice(5));
+    }, 200);
+  });
+  expect(await settings).toBe(200);
+
+  const saved = JSON.parse(await readFile(configPath, "utf8"));
+  expect(saved.ui?.theme).toBe("dark");
+  expect(saved.plugins.entries.openai.config.OPENAI_API_KEY).toBe(pluginKey);
+  // The next save starts from the live config and must keep both changes.
+  const later = await request("/api/config", "PUT", { ui: { language: "en" } });
+  expect(later.status, await later.clone().text()).toBe(200);
+  const after = JSON.parse(await readFile(configPath, "utf8"));
+  expect(after.ui?.theme).toBe("dark");
+  expect(after.plugins.entries.openai.config.OPENAI_API_KEY).toBe(pluginKey);
+}, 60_000);

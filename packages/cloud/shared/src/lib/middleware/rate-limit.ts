@@ -29,6 +29,7 @@ import {
   sameOrganizationPolicyStamp,
 } from "../services/organization-policy-stamp";
 import { requireOrganizationRateTier } from "../services/organization-quota-policy";
+import { enforcePlanRequestLimit } from "../services/plan-request-limiter";
 import { logger } from "../utils/logger";
 import { getRequestCookie } from "../utils/request-cookie";
 import { checkRateLimitRedis, type RateLimitResult } from "./rate-limit-redis";
@@ -483,6 +484,11 @@ export async function readApiKeyRateLimit(
  *
  * With `apiKeyId`, the key's own `rate_limit` (requests per minute across all
  * endpoints) is enforced as a cap under the plan tier in the same decision.
+ *
+ * Completions first pass the configured plan burst and sustained buckets
+ * (`plan-request-limiter`). That check is in memory and runs before the
+ * policy transaction, so a refused request does no database or Durable Object
+ * work and an admitted one gains no round trip.
  */
 export async function enforceOrgRateLimit(
   organizationId: string,
@@ -494,8 +500,19 @@ export async function enforceOrgRateLimit(
     config?: OrgRateLimitConfig;
     /** Presenting API key; its `rate_limit` caps requests under the plan tier. */
     apiKeyId?: string | null;
+    /** Authenticated user; with the organization and plan it keys the plan buckets. */
+    userId?: string | null;
   } = {},
 ): Promise<Response | null> {
+  if (endpointType === "completions") {
+    const planLimited = enforcePlanRequestLimit({
+      organizationId,
+      userId: options.userId,
+      planKey: options.config?.planKey,
+      planEffectiveUntil: options.config?.authority?.effectiveUntil,
+    });
+    if (planLimited) return planLimited;
+  }
   try {
     const admitOrganizationPolicy = options.cacheOnly
       ? withOrganizationPolicyReadAdmission

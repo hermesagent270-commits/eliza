@@ -1501,10 +1501,11 @@ export class Vault {
   ): Promise<AgentIdentity[]> {
     const db = getDb();
     const limit = Math.min(Math.max(Math.floor(options.limit ?? 100), 1), 200);
-    const offset = Math.min(
-      Math.max(Math.floor(options.offset ?? 0), 0),
-      100_000,
-    );
+    const requestedOffset = options.offset ?? 0;
+    const offset =
+      Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+        ? requestedOffset
+        : 0;
     const rows = await db
       .select()
       .from(agents)

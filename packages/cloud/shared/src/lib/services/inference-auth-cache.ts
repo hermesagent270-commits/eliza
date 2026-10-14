@@ -53,6 +53,8 @@ export interface InferenceAdmissionSnapshot {
     standardRpm: number;
     strictRpm: number;
   };
+  /** Granted plan key (or `custom` under an override) for the plan request buckets. */
+  planKey?: string;
   /**
    * Payment-reversal hold state read under the publishing policy lock. Only an
    * explicit `false` lets the snapshot admission lane skip the primary read.

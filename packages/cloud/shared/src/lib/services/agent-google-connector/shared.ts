@@ -111,11 +111,14 @@ export interface ManagedGoogleGmailReadResult {
   attachments?: GoogleGmailAttachment[];
   message: ManagedGoogleGmailMessage;
   bodyText: string;
+  bodyHtml: string | null;
+  bodyHtmlStatus: "available" | "none" | "too-large" | "owner-only";
   /** Inert http(s) anchors from the HTML parts; clients review them before opening. */
   links?: GmailMessageLink[];
 }
 
 export interface ManagedGoogleGmailSearchResult {
+  supportsSpamTrash: boolean;
   nextPageToken?: string | null;
   messages: ManagedGoogleGmailMessage[];
   /**

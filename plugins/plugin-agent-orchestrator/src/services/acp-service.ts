@@ -6053,6 +6053,10 @@ export class AcpService extends Service {
 
   private setting(key: string): string | undefined {
     const fromRuntime = this.runtime.getSetting(key);
+    // getSetting returns a saved "true"/"false" as a boolean. Keep it, or a
+    // switch saved in Settings or the character file falls back to env.
+    if (typeof fromRuntime === "boolean" || typeof fromRuntime === "number")
+      return String(fromRuntime);
     if (typeof fromRuntime === "string" && fromRuntime.length > 0)
       return fromRuntime;
     const fromEnv = process.env[key];

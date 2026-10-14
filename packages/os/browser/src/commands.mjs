@@ -208,7 +208,15 @@ export function pageCommand(command, snapshotId, validateOnly = false) {
       // "routingNumber" and "card_cvv" become separate words.
       .replace(/([a-z])([A-Z])/g, "$1 $2")
       .replace(/[_.-]+/g, " ");
-    if (/\b(?:pass\s*(?:word|phrase)|pwd|pin|security\s+answer)\b/i.test(words))
+    // "PIN code" is also the Indian postal code: a field that names itself a
+    // postal code is an address field, not a password.
+    const postal =
+      autocomplete.includes("postal-code") ||
+      /\b(?:postal|zip|post\s*code)\b/i.test(words);
+    if (
+      /\b(?:pass\s*(?:word|phrase)|pwd|security\s+answer)\b/i.test(words) ||
+      (!postal && /\bpin\b/i.test(words))
+    )
       return "password";
     if (
       /\b(?:one\s*time\s*(?:pass)?code|verification\s+code|otp|2fa|mfa|passcode|authentication\s+code)\b/i.test(

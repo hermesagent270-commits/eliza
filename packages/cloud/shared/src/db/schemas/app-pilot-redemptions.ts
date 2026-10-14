@@ -104,3 +104,12 @@ export const appPilotRedemptions = pgTable(
 );
 
 export type AppPilotRedemption = InferSelectModel<typeof appPilotRedemptions>;
+
+export const appPilotActivations = pgTable("app_pilot_activations", {
+  redemption_id: uuid("redemption_id")
+    .primaryKey()
+    .references(() => appPilotRedemptions.id, { onDelete: "restrict" }),
+  activated_at: timestamp("activated_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+});

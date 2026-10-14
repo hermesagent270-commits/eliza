@@ -850,7 +850,7 @@ describe("removeAospGeneratedStagingDir", () => {
   it("removes only generated staging directories under the active bundle", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "aosp-staging-cleanup-"));
     const bundleRoot = path.join(root, "local-inference", "models", "2b");
-    const stagingDir = path.join(bundleRoot, "tts", "kokoro.staging");
+    const stagingDir = path.join(bundleRoot, "tts", "paradee.staging");
     mkdirSync(stagingDir, { recursive: true });
     writeFileSync(path.join(stagingDir, "partial.gguf"), "partial");
 
@@ -942,11 +942,11 @@ describe("AOSP embedding gate", () => {
 });
 
 describe("AOSP TEXT_TO_SPEECH backend selection", () => {
-  it("routes every request through the Kokoro FFI handler", async () => {
+  it("routes every request through the Paradee FFI handler", async () => {
     const calls: string[] = [];
     const handler = makeAospTextToSpeechHandler({
-      kokoro: async () => {
-        calls.push("kokoro");
+      paradee: async () => {
+        calls.push("paradee");
         return new Uint8Array([1, 2, 3]);
       },
     });
@@ -954,12 +954,12 @@ describe("AOSP TEXT_TO_SPEECH backend selection", () => {
     await expect(handler({} as never, "hello")).resolves.toEqual(
       new Uint8Array([1, 2, 3]),
     );
-    expect(calls).toEqual(["kokoro"]);
+    expect(calls).toEqual(["paradee"]);
   });
 
-  it("propagates Kokoro failures verbatim (no silent fallback)", async () => {
+  it("propagates Paradee failures verbatim (no silent fallback)", async () => {
     const handler = makeAospTextToSpeechHandler({
-      kokoro: async () => {
+      paradee: async () => {
         throw new Error("missing lib");
       },
     });
@@ -970,7 +970,7 @@ describe("AOSP TEXT_TO_SPEECH backend selection", () => {
   it("invokes the foreground-use hook on every request", async () => {
     let foreground = 0;
     const handler = makeAospTextToSpeechHandler({
-      kokoro: async () => new Uint8Array([0]),
+      paradee: async () => new Uint8Array([0]),
       onForegroundUse: () => {
         foreground++;
       },

@@ -655,18 +655,25 @@ function normalizeIsoString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     fail(400, `${field} must be an ISO 8601 string`);
   }
-  const ms = Date.parse(value);
+  const ms = Date.parse(value.trim());
   if (!Number.isFinite(ms)) {
     fail(400, `${field} must be a valid ISO 8601 string`);
   }
-  return value;
+  // Match the canonical LifeOps normalizer (@elizaos/contracts
+  // service-normalize, used by every other PA service): return the canonical
+  // ISO form, not the caller's spelling. The repositories filter and sort
+  // persisted timestamps as text (`observed_at >= sinceAt`,
+  // `ORDER BY observed_at DESC`), so an offset, date-only, or unpadded
+  // spelling stored verbatim would compare against canonical values as a
+  // different instant.
+  return new Date(ms).toISOString();
 }
 
 function normalizeOptionalIsoString(
   value: unknown,
   field: string,
 ): string | null {
-  if (value === undefined || value === null) return null;
+  if (value === undefined || value === null || value === "") return null;
   return normalizeIsoString(value, field);
 }
 
@@ -682,7 +689,16 @@ function normalizeOptionalNonNegativeInteger(
   value: unknown,
   field: string,
 ): number | null {
-  if (value === undefined || value === null) return null;
+  // Match the canonical LifeOps normalizer (@elizaos/contracts
+  // service-normalize, used by every sibling PA service): an empty
+  // string is absent (null), not 0 — Number("") === 0 would otherwise
+  // fabricate an idle time of 0 seconds for a field the caller never
+  // sent. A whitespace-only string is not absent either; the
+  // canonical copy rejects it, so reject it here too.
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "string" && value.trim().length === 0) {
+    fail(400, `${field} must be a non-negative integer`);
+  }
   const num = typeof value === "string" ? Number(value) : value;
   if (typeof num !== "number" || !Number.isInteger(num) || num < 0) {
     fail(400, `${field} must be a non-negative integer`);

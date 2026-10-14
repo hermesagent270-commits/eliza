@@ -46,3 +46,28 @@ describe("convertMarkdownToTelegram incomplete code blocks", () => {
     );
   });
 });
+
+describe("convertMarkdownToTelegram bare URLs", () => {
+  it("keeps underscores and asterisks inside a URL as part of the URL", () => {
+    expect(
+      convertMarkdownToTelegram("Go to https://example.com/_private_/page now"),
+    ).toBe("Go to https://example\\.com/\\_private\\_/page now");
+    expect(
+      convertMarkdownToTelegram("Raw https://example.com/a*b*c link"),
+    ).toBe("Raw https://example\\.com/a\\*b\\*c link");
+  });
+
+  it("leaves emphasis and punctuation around a URL outside it", () => {
+    expect(convertMarkdownToTelegram("*see https://example.com/x*")).toBe(
+      "_see https://example\\.com/x_",
+    );
+    expect(convertMarkdownToTelegram("Read https://example.com/a_b.")).toBe(
+      "Read https://example\\.com/a\\_b\\.",
+    );
+    expect(
+      convertMarkdownToTelegram(
+        "Wiki https://en.wikipedia.org/wiki/Test_(x) ok",
+      ),
+    ).toBe("Wiki https://en\\.wikipedia\\.org/wiki/Test\\_\\(x\\) ok");
+  });
+});

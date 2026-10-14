@@ -560,6 +560,8 @@ describe("chatDbMessageToPublicShape", () => {
       chatId: "iMessage;-;+15551234567",
       timestamp: 1_700_000_000_000,
       isFromMe: false,
+      chatType: "direct",
+      guid: "guid-42",
       hasAttachments: true,
       attachmentPaths: ["/tmp/image.png"],
     });
@@ -1099,6 +1101,23 @@ describe("normalizeContactHandle", () => {
   it("trims whitespace around the input", () => {
     expect(normalizeContactHandle("  +15551234567  ")).toBe("+15551234567");
   });
+
+  it("keys a contact phone the way the connector keys a chat.db handle", () => {
+    // chat.db stores E.164 handles; the connector keys them with
+    // formatPhoneNumber. Each contact spelling must reach that same key.
+    const cases: Array<[contact: string, chatDbHandle: string]> = [
+      ["1 (555) 123-4567", "+15551234567"], // country code without "+"
+      ["+1 (555) 123-4567", "+15551234567"], // "+" form, US
+      ["+44 20 7946 0958", "+442079460958"], // "+" form, UK
+      ["44 20 7946 0958", "+442079460958"], // UK country code without "+"
+    ];
+    for (const [contact, chatDbHandle] of cases) {
+      expect(normalizeContactHandle(contact)).toBe(formatPhoneNumber(chatDbHandle));
+    }
+    // A national number carries no country, so it cannot be mapped to an
+    // E.164 handle; it keeps its digits, as formatPhoneNumber does.
+    expect(normalizeContactHandle("(555) 987-6543")).toBe(formatPhoneNumber("5559876543"));
+  });
 });
 
 describe("parseContactsOutput", () => {
@@ -1120,6 +1139,11 @@ describe("parseContactsOutput", () => {
     expect(map.get("+15551234567")?.name).toBe("Alex Chen");
     expect(map.get("mom@example.com")?.name).toBe("Mom");
     expect(map.get("+15550000000")?.name).toBe("Dad");
+  });
+
+  it("resolves a contact stored without the + prefix by its E.164 chat.db handle", () => {
+    const map = parseContactsOutput("phone\t1 (555) 123-4567\tAlex Chen");
+    expect(map.get(normalizeContactHandle("+15551234567"))?.name).toBe("Alex Chen");
   });
 
   it("skips rows with missing handle or name", () => {

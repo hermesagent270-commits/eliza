@@ -356,9 +356,11 @@ function amountLabel(amount: LpActionParams["amount"]): string | undefined {
 // single-sourced write subactions (open/close/reposition here).
 function lpGateParams(params: LpActionParams): WalletFinancialWriteParams {
   const range = getRangeParam(params);
+  const { chain, chainId } = resolveChain(params);
   return {
     subaction: params.subaction as string,
-    chain: resolveChain(params).chain,
+    chain,
+    chainId,
     amount: amountLabel(getAmountParam(params)),
     pool: getPoolParam(params),
     position: getPositionParam(params),

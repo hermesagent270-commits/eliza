@@ -409,3 +409,106 @@ test("unhashed legacy Network acceptance stays unknown for direct and receipt-on
     blooioAdapter.sendReplyWithReceipt = original;
   }
 });
+
+test("a receipt without connector and thread binding stays unknown and never resends", async () => {
+  const { readInternalDeliveryReceipt } = await import(
+    "../src/internal-delivery"
+  );
+  const redis = createRedis();
+  const payload = {
+    platform: "blooio",
+    project: "eliza-app",
+    connectorAccountId: "blooio:+14155559999",
+    phoneNumber: "+14155550100",
+    text: "Reminder: call mom",
+    idempotencyKey: "reminder-before-binding",
+  };
+  // The receipt hash the gateway wrote until 2026-10-12: no connector account
+  // or thread slot. Such receipts live for the full receipt TTL after a deploy.
+  const hashedBeforeBinding = [
+    ...new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(
+          JSON.stringify([
+            payload.platform,
+            payload.project,
+            null,
+            payload.phoneNumber,
+            payload.text,
+            payload.idempotencyKey,
+          ]),
+        ),
+      ),
+    ),
+  ]
+    .map((x) => x.toString(16).padStart(2, "0"))
+    .join("");
+  const request = (body: object, path = "/internal/deliver") =>
+    new Request(`https://gateway.test${path}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  const key = `internal-delivery:blooio:eliza-app:${payload.idempotencyKey}`;
+  await redis.set(
+    key,
+    JSON.stringify({
+      state: "complete",
+      hash: hashedBeforeBinding,
+      acceptedAt: "2026-10-12T00:00:00.000Z",
+      providerMessageIds: ["msg-before-binding"],
+    }),
+  );
+  const replay = await deliverInternalMessage(request(payload), { redis });
+  expect(replay.status).toBe(202);
+  expect(await replay.json()).toMatchObject({
+    acceptance: "unknown",
+    retryable: false,
+  });
+  const receipt = await readInternalDeliveryReceipt(
+    request(payload, "/internal/deliver/receipt"),
+    { redis },
+  );
+  expect(receipt.status).toBe(202);
+  const changedConnector = {
+    ...payload,
+    connectorAccountId: "blooio:+14155558888",
+  };
+  const redirected = await deliverInternalMessage(request(changedConnector), {
+    redis,
+  });
+  expect(redirected.status).toBe(202);
+  expect(await redirected.json()).toMatchObject({
+    acceptance: "unknown",
+    retryable: false,
+  });
+  expect(
+    (
+      await readInternalDeliveryReceipt(
+        request(changedConnector, "/internal/deliver/receipt"),
+        { redis },
+      )
+    ).status,
+  ).toBe(202);
+  // A different message under the same key is still a conflict.
+  const otherText = { ...payload, text: "Reminder: call dad" };
+  expect(
+    (await deliverInternalMessage(request(otherText), { redis })).status,
+  ).toBe(409);
+  expect(
+    (
+      await readInternalDeliveryReceipt(
+        request(otherText, "/internal/deliver/receipt"),
+        { redis },
+      )
+    ).status,
+  ).toBe(202);
+  // An unsettled dispatch from before the deploy stays indeterminate.
+  await redis.set(
+    key,
+    JSON.stringify({ state: "indeterminate", hash: hashedBeforeBinding }),
+  );
+  const pending = await deliverInternalMessage(request(payload), { redis });
+  expect(pending.status).toBe(202);
+  expect(await pending.json()).toMatchObject({ acceptance: "unknown" });
+});

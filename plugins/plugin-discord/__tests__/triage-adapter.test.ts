@@ -435,6 +435,7 @@ describe("DiscordTriageAdapter", () => {
 		expect(service.sends).toHaveLength(1);
 		expect(service.sends[0].target.channelId).toBe("c1");
 		expect(service.sends[0].content.text).toBe("on it — will take a look");
+		expect(service.sends[0].content.replyToExternalMessageId).toBe("88");
 	});
 
 	it("rejects drafts that resolve no channel", async () => {

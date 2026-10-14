@@ -18,7 +18,7 @@ app.get("/", (c) =>
     version: "2.0.0",
     description:
       "Real-time weather data, forecasts, and location search powered by Open-Meteo API.",
-    transport: ["http", "sse"],
+    transport: ["http"],
     endpoint: "/api/mcps/weather/mcp",
     tools: [
       {
@@ -46,8 +46,6 @@ app.get("/", (c) =>
     },
     features: [
       "Current conditions",
-      "16-day forecasts",
-      "Precipitation probability",
       "UV index",
       "Sunrise/sunset times",
       "Wind speed and direction",

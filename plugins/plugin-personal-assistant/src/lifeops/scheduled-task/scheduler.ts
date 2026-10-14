@@ -53,6 +53,7 @@ import {
   resolveOwnerFactStore,
 } from "../owner/fact-store.js";
 import { LifeOpsRepository } from "../repository.js";
+import { workThreadFollowupInactiveReason } from "../work-threads/followup-thread-check.js";
 import { readScheduledTaskChatDeliveryBinding } from "./delivery-binding.js";
 import {
   applyReminderIntensityToNoReplyPolicy,
@@ -530,22 +531,28 @@ export async function processDueScheduledTasks(
     ownerFacts,
     anchors: getAnchorRegistry(request.runtime),
   };
-  // Indexed pass 1: due-to-fire candidates.
+  // Pass 1: due-to-fire and owner-local re-evaluation candidates.
   //
   // The partial index `idx_life_scheduled_tasks_due` covers
-  // `(agent_id, next_fire_at)` for every status except `dismissed`, so these
-  // queries touch O(# due rows + # event-driven rows with NULL) instead of
-  // every row owned by the agent. `next_fire_at IS NULL` rows are included
+  // `(agent_id, next_fire_at)` for every status except `dismissed`. The
+  // owner-local JSON predicate can require scanning the agent's rows; these
+  // queries do not guarantee work proportional to due rows alone.
+  // `next_fire_at IS NULL` rows are included
   // in the live slice so event / manual / after_task triggers (which
   // deliberately have no wall-clock fire time) still get a chance at
   // fire-time gates if they're invoked through another path. The
   // authoritative `isScheduledTaskDue` re-evaluates per task below.
+  // Owner-local cron also needs evaluation when its saved index is in the
+  // future: travel or an owner timezone change can move today's fire earlier.
+  // Fixed-zone cron keeps the saved-time filter; due evaluation and CAS own
+  // occurrence admission and prevent repeat dispatch.
   const nowIso = request.now.toISOString();
   const liveCandidates = await repo.listScheduledTasks(request.agentId, {
     status: ["scheduled", "fired"],
     dueAtOrBeforeIso: nowIso,
+    reevaluateOwnerLocalCron: true,
   });
-  // Indexed pass 1b: recurrence-refire candidates. A RECURRING task parked in
+  // Pass 1b: recurrence-refire candidates. A RECURRING task parked in
   // `acknowledged` or a terminal-but-refirable status (`completed` /
   // `skipped` / `expired` / `failed` — never `dismissed`) keeps a
   // trigger-derived `next_fire_at` (see `resolveNextFireAt` in the runner);
@@ -557,6 +564,7 @@ export async function processDueScheduledTasks(
     status: ["acknowledged", "completed", "skipped", "expired", "failed"],
     dueAtOrBeforeIso: nowIso,
     requireNextFireAt: true,
+    reevaluateOwnerLocalCron: true,
   });
   // Status sets are disjoint, so a plain concat cannot double-list a task.
   const dueCandidates = [...liveCandidates, ...refireCandidates];
@@ -705,6 +713,28 @@ export async function processDueScheduledTasks(
     const decision = await isScheduledTaskDue(task, dueContext);
     if (!decision.due) continue;
     try {
+      // A thread follow-up is derived from its thread: once the thread is
+      // stopped or completed the task must not notify, whether or not its
+      // removal in the thread action succeeded or the task predates that
+      // cleanup. Dismissed rows never refire.
+      const inactiveReason = await workThreadFollowupInactiveReason(
+        request.runtime,
+        task,
+      );
+      if (inactiveReason) {
+        const dismissed = await runner.apply(task.taskId, "dismiss", {
+          reason: inactiveReason,
+        });
+        result.fires.push({
+          taskId: task.taskId,
+          status: dismissed.state.status,
+          reason: inactiveReason,
+          ...(decision.occurrenceAtIso
+            ? { occurrenceAtIso: decision.occurrenceAtIso }
+            : {}),
+        });
+        continue;
+      }
       const fireResult = await runner.fireWithResult(task.taskId, {
         cause: "automatic",
         allowTerminalRefire: isRecurringTrigger(task.trigger),

@@ -1328,6 +1328,21 @@ class SqlTodoStore<TSchema extends Record<string, unknown>>
         },
       );
     }
+    for (const item of args.todos) {
+      if (
+        item.parentTodoId !== undefined &&
+        item.parentTodoId !== null &&
+        validateUuid(item.parentTodoId) === null
+      ) {
+        throw new ElizaError(
+          `${TODOS_LOG_PREFIX} parent todo id is not a valid UUID`,
+          {
+            code: TODO_INVALID_PARENT_ERROR_CODE,
+            context: { parentTodoId: item.parentTodoId },
+          },
+        );
+      }
+    }
     const beforeRows = await tx
       .select()
       .from(todosTable)
@@ -1351,10 +1366,12 @@ class SqlTodoStore<TSchema extends Record<string, unknown>>
           item.parentTodoId === undefined
             ? existing.parentTodoId
             : item.parentTodoId;
+        const activeForm =
+          item.activeForm === undefined ? existing.activeForm : item.activeForm;
         const needsUpdate =
           existing.content !== item.content ||
           existing.status !== item.status ||
-          existing.activeForm !== (item.activeForm ?? item.content) ||
+          existing.activeForm !== activeForm ||
           existing.parentTodoId !== parentTodoId;
         if (!needsUpdate) {
           after.push(existing);
@@ -1364,7 +1381,7 @@ class SqlTodoStore<TSchema extends Record<string, unknown>>
           .update(todosTable)
           .set({
             content: item.content,
-            activeForm: item.activeForm ?? item.content,
+            activeForm,
             status: item.status,
             ...(item.status !== existing.status
               ? {
@@ -1581,7 +1598,11 @@ class SqlTodoStore<TSchema extends Record<string, unknown>>
     scope: TodoScope,
     locator: TodoLocator,
   ): Promise<{ id: string } | { miss: TodoTargetMiss }> {
-    if (locator.id !== undefined) return { id: locator.id };
+    if (locator.id !== undefined) {
+      return validateUuid(locator.id) === null
+        ? { miss: { kind: "not_found" } }
+        : { id: locator.id };
+    }
     const todos = await this.scopeTodos(tx, scope);
     let matches: Todo[];
     if (locator.match !== undefined) {

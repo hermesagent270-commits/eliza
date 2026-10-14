@@ -542,7 +542,9 @@ export class BrowserService extends Service {
           // error-policy:J2 preserve native failures and prevent uncertain effects from being replayed.
           if (
             isBrowserDispatchFailure(error) ||
-            isIdempotentBrowserSubaction(command.subaction)
+            isIdempotentBrowserSubaction(command.subaction, {
+              script: command.script,
+            })
           )
             throw error;
           throw new BrowserDispatchFailure(
@@ -726,7 +728,9 @@ export class BrowserService extends Service {
         throw err;
       }
       const message = err instanceof Error ? err.message : String(err);
-      const idempotent = isIdempotentBrowserSubaction(command.subaction);
+      const idempotent = isIdempotentBrowserSubaction(command.subaction, {
+        script: command.script,
+      });
       logger.debug(
         `[BrowserService] target "${selected.id}" failed for ${command.subaction} (idempotent=${idempotent}): ${message}`,
       );

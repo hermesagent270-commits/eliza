@@ -115,25 +115,25 @@ export async function readEligibleSubscriptionAllowance(
       );
     const subscriptionId = period.subscription_id;
     const subscriptionRevision = period.subscription_revision;
-    const [source] = await tx
-      .select()
+    const [row] = await tx
+      .select({ source: billingSubscriptions, grantRevision: billingSubscriptionRevisions })
       .from(billingSubscriptions)
+      .leftJoin(
+        billingSubscriptionRevisions,
+        and(
+          eq(billingSubscriptionRevisions.subscription_id, billingSubscriptions.id),
+          eq(billingSubscriptionRevisions.organization_id, organizationId),
+          eq(billingSubscriptionRevisions.revision, subscriptionRevision),
+        ),
+      )
       .where(
         and(
           eq(billingSubscriptions.id, subscriptionId),
           eq(billingSubscriptions.organization_id, organizationId),
         ),
       );
-    const [grantRevision] = await tx
-      .select()
-      .from(billingSubscriptionRevisions)
-      .where(
-        and(
-          eq(billingSubscriptionRevisions.subscription_id, subscriptionId),
-          eq(billingSubscriptionRevisions.organization_id, organizationId),
-          eq(billingSubscriptionRevisions.revision, subscriptionRevision),
-        ),
-      );
+    const source = row?.source;
+    const grantRevision = row?.grantRevision;
     if (
       !policy.subscriptionFunded ||
       policy.authority.sourceSubscriptionId !== period.subscription_id ||

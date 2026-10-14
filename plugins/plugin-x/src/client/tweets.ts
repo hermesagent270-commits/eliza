@@ -341,6 +341,7 @@ export async function fetchTweets(
         "entities",
         "public_metrics",
         "attachments",
+        "note_tweet",
       ],
       "user.fields": ["id", "name", "username", "profile_image_url"],
       "media.fields": ["url", "preview_image_url", "type"],
@@ -389,6 +390,7 @@ export async function fetchTweetsAndReplies(
         "entities",
         "public_metrics",
         "attachments",
+        "note_tweet",
       ],
       "user.fields": ["id", "name", "username", "profile_image_url"],
       "media.fields": ["url", "preview_image_url", "type"],
@@ -469,13 +471,18 @@ export async function createCreateTweetRequestV2(
   return await getTweetV2(tweetResponse.data.id, auth, optionsConfig);
 }
 
+/** X returns posts over 280 characters truncated in `text`; the full body is in `note_tweet.text`. */
+export function fullTweetText(tweet: TweetV2): string {
+  return tweet.note_tweet?.text ?? tweet.text ?? "";
+}
+
 export function parseTweetV2ToV1(
   tweetV2: TweetV2,
   includes?: ApiV2Includes,
 ): Tweet {
   const parsedTweet: Tweet = {
     id: tweetV2.id,
-    text: tweetV2.text ?? "",
+    text: fullTweetText(tweetV2),
     hashtags: tweetV2.entities?.hashtags?.map((tag) => tag.tag) ?? [],
     mentions:
       tweetV2.entities?.mentions?.map((mention) => ({
@@ -665,6 +672,7 @@ export async function fetchListTweets(
         "entities",
         "public_metrics",
         "attachments",
+        "note_tweet",
       ],
       "user.fields": ["id", "name", "username", "profile_image_url"],
       "media.fields": ["url", "preview_image_url", "type"],
@@ -934,6 +942,7 @@ export async function fetchLikedTweets(
         "entities",
         "public_metrics",
         "attachments",
+        "note_tweet",
       ],
       "user.fields": ["id", "name", "username", "profile_image_url"],
       "media.fields": ["url", "preview_image_url", "type"],
@@ -1044,6 +1053,7 @@ export async function getTweet(
         "public_metrics",
         "attachments",
         "conversation_id",
+        "note_tweet",
       ],
       "user.fields": ["id", "name", "username", "profile_image_url"],
       "media.fields": ["url", "preview_image_url", "type"],

@@ -730,7 +730,24 @@ export async function handleTriggerRoutes(ctx: TriggerRouteContext): Promise<boo
         error(res, 'Unable to compute trigger schedule', 400);
         return true;
       }
-      nextMeta = built;
+      // An interval counts from its anchor. An edit that keeps an enabled
+      // interval (a rename, new instructions) keeps the anchor and the next
+      // run; rebuilding would restart the countdown from now.
+      const keepsInterval =
+        current.enabled &&
+        current.triggerType === 'interval' &&
+        nextTrigger.triggerType === 'interval' &&
+        nextTrigger.intervalMs === current.intervalMs &&
+        typeof current.nextRunAtMs === 'number';
+      nextMeta =
+        keepsInterval && built.trigger
+          ? {
+              ...built,
+              updatedAt: existingMeta.updatedAt,
+              updateInterval: existingMeta.updateInterval,
+              trigger: { ...built.trigger, nextRunAtMs: current.nextRunAtMs },
+            }
+          : built;
     }
     await runtime.updateTask(task.id, {
       description: nextTrigger.displayName,

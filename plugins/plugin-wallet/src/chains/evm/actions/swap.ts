@@ -366,8 +366,7 @@ export class SwapAction {
       const buyTokenInfo =
         buyTokens[resolvedToToken] ??
         buyTokens[params.toToken] ??
-        buyTokens[resolvedToToken.toLowerCase()] ??
-        Object.values(buyTokens)[0];
+        buyTokens[resolvedToToken.toLowerCase()];
       if (!buyTokenInfo?.minimumAmount) {
         throw new Error("Cannot determine minimum output amount");
       }

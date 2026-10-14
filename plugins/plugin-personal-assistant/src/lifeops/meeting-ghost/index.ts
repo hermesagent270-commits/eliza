@@ -333,6 +333,19 @@ function findAttendeeEmail(
   );
   if (exact.length > 0)
     return exact.length === 1 ? (exact[0].email ?? null) : null;
+  // A whole-word match outranks a raw substring match: "Ann" names Ann Lee
+  // even though it is also a substring of Joanne Park. Only a unique
+  // whole-word hit resolves; several stay ambiguous.
+  const wholeWord = attendees.filter((entry) => {
+    const attendeeName = normalize(entry.name);
+    if (!attendeeName) return false;
+    return (
+      includesWholePhrase(attendeeName, normalizedName) ||
+      includesWholePhrase(normalizedName, attendeeName)
+    );
+  });
+  if (wholeWord.length > 0)
+    return wholeWord.length === 1 ? (wholeWord[0].email ?? null) : null;
   const matches = attendees.filter((entry) => {
     const attendeeName = normalize(entry.name);
     if (!attendeeName) return false;

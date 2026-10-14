@@ -163,6 +163,42 @@ export async function listDocumentRecords(
   return memories.map(toDocumentRecord);
 }
 
+/** Number of documents in the scope, over the same filter `listDocumentRecords` pages. */
+export async function countDocumentRecords(scope: DocumentScope) {
+  return memoriesRepository.countByType(
+    scope.agentId,
+    "documents",
+    scope.roomId,
+  );
+}
+
+/**
+ * Every document record in the scope, newest first, yielded one keyset page at
+ * a time so a document added or removed during the scan can neither repeat
+ * nor hide another one, and the caller holds one page in memory, not the
+ * whole scope.
+ */
+export async function* scanDocumentRecords(
+  scope: DocumentScope,
+  pageSize = 200,
+) {
+  let after: { createdAt: number; id: string } | undefined;
+  for (;;) {
+    const page = await memoriesRepository.search({
+      agentId: scope.agentId,
+      roomId: scope.roomId,
+      type: "documents",
+      limit: pageSize,
+      after,
+    });
+    yield page.map(toDocumentRecord);
+    const last = page.at(-1);
+    if (page.length < pageSize || !last?.id || last.createdAt === undefined)
+      return;
+    after = { createdAt: last.createdAt, id: last.id };
+  }
+}
+
 export async function createDocumentRecord(
   user: AuthedUser,
   scope: DocumentScope,

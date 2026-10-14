@@ -2085,7 +2085,7 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
       assertJsonbStorable(component.data);
       await this.db.insert(componentTable).values({
         ...component,
-        createdAt: new Date(),
+        createdAt: component.createdAt !== undefined ? new Date(component.createdAt) : new Date(),
       });
       return true;
     });

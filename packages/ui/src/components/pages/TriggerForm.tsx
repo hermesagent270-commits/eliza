@@ -35,6 +35,7 @@ import {
   localizedExecutionStatus,
   nextRunsForCron,
   nextRunsForInterval,
+  onceInstant,
   type TranslateFn,
   type TriggerFormState,
   validateCronExpression,
@@ -1230,7 +1231,7 @@ function SchedulePreview({
     if (form.triggerType === "once") {
       const raw = form.scheduledAtIso.trim();
       if (!raw || !Number.isFinite(Date.parse(raw))) return null;
-      const date = new Date(raw);
+      const date = new Date(onceInstant(form));
       const isPast = date.getTime() <= now.getTime();
       return { kind: "once" as const, date, isPast };
     }
@@ -1256,17 +1257,7 @@ function SchedulePreview({
     }
 
     return null;
-  }, [
-    form.triggerType,
-    form.durationValue,
-    form.durationUnit,
-    form.scheduledAtIso,
-    form.cronExpression,
-    form.timezone,
-    form.eventKind,
-    previewNow,
-    t,
-  ]);
+  }, [form, previewNow, t]);
 
   if (!preview) return null;
 

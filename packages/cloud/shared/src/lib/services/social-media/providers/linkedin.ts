@@ -19,7 +19,7 @@ import {
   decodeSocialMediaBase64,
   downloadSocialMediaBytes,
 } from "../media-download";
-import { withRetry } from "../rate-limit";
+import { type RetryOptions, withRetry } from "../rate-limit";
 
 const LINKEDIN_API_BASE = "https://api.linkedin.com/v2";
 
@@ -74,6 +74,7 @@ async function linkedinApiRequest<T>(
   endpoint: string,
   accessToken: string,
   options: RequestInit = {},
+  retry: Pick<RetryOptions, "replayUnknownOutcome"> = {},
 ): Promise<T> {
   const url = endpoint.startsWith("http") ? endpoint : `${LINKEDIN_API_BASE}${endpoint}`;
 
@@ -98,7 +99,7 @@ async function linkedinApiRequest<T>(
         throw new Error(json.message);
       return json;
     },
-    { platform: "linkedin", maxRetries: 3 },
+    { platform: "linkedin", maxRetries: 3, ...retry },
   );
 
   return data as T;
@@ -285,6 +286,8 @@ export const linkedinProvider: SocialMediaProvider = {
           method: "POST",
           body: JSON.stringify(ugcPost),
         },
+        // A replay after a timeout or a 5xx publishes the share twice.
+        { replayUnknownOutcome: false },
       );
 
       // Extract the share ID

@@ -154,6 +154,15 @@ export function convertMarkdownToTelegram(markdown: string): string {
     },
   );
 
+  // 3b. Bare URLs: hold them aside as plain text before the emphasis passes,
+  //     or a `_x_` or `*x*` inside a path becomes italic and Telegram links to
+  //     a different address. Balanced parentheses stay in the URL; trailing
+  //     punctuation and emphasis closers do not.
+  converted = converted.replace(
+    /https?:\/\/(?:[^\s<>()]|\([^\s()]*\))*(?:[^\s<>().,;:!?*_~'"]|\([^\s()]*\))/g,
+    (url) => storeReplacement(escapePlainText(url)),
+  );
+
   // Protect escaped asterisks before interpreting emphasis. Consuming pairs
   // of backslashes also preserves whether the next asterisk is escaped.
   // Code and link destinations were already stored above and stay unchanged.

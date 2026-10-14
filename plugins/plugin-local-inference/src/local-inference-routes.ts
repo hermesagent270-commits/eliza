@@ -6,6 +6,7 @@
  * (engine / voice / catalog / downloader) is imported lazily on first route use
  * to keep it off the boot critical path (#9565).
  */
+
 import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import type * as http from "node:http";
@@ -44,6 +45,7 @@ import {
 	LOCAL_INFERENCE_MODEL_TYPES,
 	LOCAL_INFERENCE_PROVIDER_ID,
 } from "./provider.js";
+import { withConfigFileLock } from "./services/config-file-lock";
 import { classifyDeviceTier } from "./services/device-tier.js";
 import { resolveLocalInferenceStoredPath } from "./services/paths.js";
 import type { DownloadJob } from "./services/types.js";
@@ -408,31 +410,6 @@ async function writeJsonFile(
 		await fsp.rm(tmp, { force: true }).catch(() => undefined);
 		throw error;
 	}
-}
-// Serializes read-modify-write transactions per persisted config file. The
-// management mutations (set_assignment, upsertInstalledModel,
-// removeInstalledModel) each read the current JSON, mutate it, and write it
-// back; two concurrent mutations against one file would otherwise both read the
-// pre-write state and the second write would clobber the first, silently
-// dropping an update while both callers return success (issue #25123). Keyed by
-// absolute file path so unrelated files never serialize against each other. The
-// stored promise is settle-tracking, so one rejected transaction never breaks
-// the chain for the next waiter.
-const configFileMutex = new Map<string, Promise<unknown>>();
-async function withConfigFileLock<T>(
-	filePath: string,
-	task: () => Promise<T>,
-): Promise<T> {
-	const prior = configFileMutex.get(filePath) ?? Promise.resolve();
-	const next = prior.then(task, task);
-	configFileMutex.set(
-		filePath,
-		next.then(
-			() => undefined,
-			() => undefined,
-		),
-	);
-	return next;
 }
 async function readRegistry(): Promise<InstalledModel[]> {
 	const registry = await readJsonFile<{

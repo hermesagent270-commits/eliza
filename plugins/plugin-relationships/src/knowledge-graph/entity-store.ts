@@ -17,6 +17,8 @@ import {
   type LifeOpsEntityState as EntityState,
   type LifeOpsEntityVisibility as EntityVisibility,
   normalizeEntityConnectorAccountId,
+  normalizeEntityIdentityHandle,
+  normalizeEntityIdentityPlatform,
   SELF_ENTITY_ID,
 } from "@elizaos/contracts";
 import type { IAgentRuntime } from "@elizaos/core";
@@ -596,18 +598,27 @@ export class EntityStore {
     }
     let entities = await this.listOperation(filters);
     if (query.identity) {
-      const platformKey = query.identity.platform.toLowerCase();
-      const handleKey = query.identity.handle.toLowerCase();
+      const platformKey = normalizeEntityIdentityPlatform(
+        query.identity.platform,
+      );
+      const handleKey = normalizeEntityIdentityHandle(
+        query.identity.platform,
+        query.identity.handle,
+      );
       const accountKey = normalizeEntityConnectorAccountId(
         query.identity.connectorAccountId,
       );
       entities = entities.filter((entity) =>
         entity.identities.some(
           (identity) =>
-            identity.platform.toLowerCase() === platformKey &&
+            normalizeEntityIdentityPlatform(identity.platform) ===
+              platformKey &&
             normalizeEntityConnectorAccountId(identity.connectorAccountId) ===
               accountKey &&
-            identity.handle.toLowerCase() === handleKey,
+            normalizeEntityIdentityHandle(
+              identity.platform,
+              identity.handle,
+            ) === handleKey,
         ),
       );
     }
@@ -617,16 +628,27 @@ export class EntityStore {
         let confidence = 0;
         let safeToSend = false;
         if (query.identity) {
+          const queryIdentity = query.identity;
+          const platformKey = normalizeEntityIdentityPlatform(
+            queryIdentity.platform,
+          );
+          const handleKey = normalizeEntityIdentityHandle(
+            queryIdentity.platform,
+            queryIdentity.handle,
+          );
+          const accountKey = normalizeEntityConnectorAccountId(
+            queryIdentity.connectorAccountId,
+          );
           const match = entity.identities.find(
             (identity) =>
-              identity.platform.toLowerCase() ===
-                query.identity?.platform.toLowerCase() &&
+              normalizeEntityIdentityPlatform(identity.platform) ===
+                platformKey &&
               normalizeEntityConnectorAccountId(identity.connectorAccountId) ===
-                normalizeEntityConnectorAccountId(
-                  query.identity.connectorAccountId,
-                ) &&
-              identity.handle.toLowerCase() ===
-                query.identity.handle.toLowerCase(),
+                accountKey &&
+              normalizeEntityIdentityHandle(
+                identity.platform,
+                identity.handle,
+              ) === handleKey,
           );
           if (match) {
             confidence = match.confidence;

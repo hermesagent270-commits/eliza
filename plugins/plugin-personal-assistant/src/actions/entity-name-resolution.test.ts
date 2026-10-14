@@ -277,4 +277,68 @@ describe("ENTITY structured-name resolution fails closed on ambiguity", () => {
     expect(outcome.error).toBe("MISSING_EDGE_ID");
     expect(loggedRelationshipIds).toEqual([]);
   });
+
+  it("does not log to a contact whose handle merely contains the named fragment", async () => {
+    // "anna" is a mid-segment substring of "joanna.bowman": resolving it
+    // used to point the interaction at Joanna even though no Joanna was
+    // named. A needle that is not a whole address part must stay unmatched.
+    directory = [
+      relationship(
+        "rel-joanna",
+        "Joanna Bowman",
+        "joanna.bowman",
+        "joanna.bowman@example.test",
+      ),
+    ];
+    const outcome = await logNamedInteraction(makeRuntime(), { name: "anna" });
+    expect(outcome.success).toBe(false);
+    expect(outcome.error).toBe("MISSING_EDGE_ID");
+    expect(loggedRelationshipIds).toEqual([]);
+  });
+
+  it("does not log to a contact whose name merely contains the named fragment", async () => {
+    directory = [
+      relationship("rel-susanna", "Susanna Reed", "susanna@example.test"),
+    ];
+    const outcome = await logNamedInteraction(makeRuntime(), { name: "anna" });
+    expect(outcome.success).toBe(false);
+    expect(outcome.error).toBe("MISSING_EDGE_ID");
+    expect(loggedRelationshipIds).toEqual([]);
+  });
+
+  it("still logs through the address tier for a whole handle or email", async () => {
+    directory = [
+      relationship(
+        "rel-joanna",
+        "Joanna Bowman",
+        "joanna.bowman",
+        "joanna.bowman@example.test",
+      ),
+    ];
+    const byHandle = await logNamedInteraction(makeRuntime(), {
+      name: "@joanna.bowman",
+    });
+    expect(byHandle.interactionRelationshipId).toBe("rel-joanna");
+    const byEmail = await logNamedInteraction(makeRuntime(), {
+      name: "joanna.bowman@example.test",
+    });
+    expect(byEmail.interactionRelationshipId).toBe("rel-joanna");
+    expect(loggedRelationshipIds).toEqual(["rel-joanna", "rel-joanna"]);
+  });
+
+  it("still logs through the address tier for a separator-delimited handle part", async () => {
+    // The contact's name never whole-part-matches "ann" ("Annette" blocks
+    // it), so only the address tier can resolve this.
+    directory = [
+      relationship(
+        "rel-annette",
+        "Annette Greer",
+        "the.ann.greene@example.test",
+      ),
+    ];
+    const outcome = await logNamedInteraction(makeRuntime(), { name: "ann" });
+    expect(outcome.success).toBe(true);
+    expect(outcome.interactionRelationshipId).toBe("rel-annette");
+    expect(loggedRelationshipIds).toEqual(["rel-annette"]);
+  });
 });

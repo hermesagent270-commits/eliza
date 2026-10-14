@@ -6,14 +6,19 @@ import type { IAgentRuntime } from "@elizaos/core";
 import { describe, expect, it } from "vitest";
 import { PdfService } from "../index";
 
-function buildPdf(text: string, infoDict: string): Buffer {
+function buildPdf(
+	text: string,
+	infoDict: string,
+	stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`,
+): Buffer {
 	const objects = [
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
-		`<< /Length ${text.length + 25} >>\nstream\nBT /F1 12 Tf 72 720 Td (${text}) Tj ET\nendstream`,
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 7 0 R >> >> >>",
+		`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
 		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
 		infoDict,
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
 	];
 
 	let body = "%PDF-1.4\n";
@@ -37,6 +42,31 @@ const buildPdfWithHostileMetadata = (text: string): Buffer =>
 	buildPdf(text, "<< /Title 123 /Author (Ada) /CreationDate 0 /ModDate false >>");
 
 describe("PdfService real unpdf boundary", () => {
+	it.each([
+		{
+			name: "paragraph line breaks",
+			stream:
+				"BT /F1 12 Tf 72 720 Td (Project schedule) Tj 0 -18 Td (Monday: prepare report) Tj 0 -18 Td (Tuesday: publish report) Tj ET",
+			expected: "Project schedule\nMonday: prepare report\nTuesday: publish report",
+		},
+		{
+			name: "a word split across font runs",
+			stream: "BT /F1 12 Tf 72 720 Td (Re) Tj /F2 12 Tf (port) Tj ET",
+			expected: "Report",
+		},
+		{
+			name: "spaces between ordinary words",
+			stream: "BT /F1 12 Tf 72 720 Td (prepare the report) Tj ET",
+			expected: "prepare the report",
+		},
+	])("preserves $name in attachment text", async ({ stream, expected }) => {
+		const service = new PdfService({} as IAgentRuntime);
+		const bytes = buildPdf("", "<< >>", stream);
+		const original = Buffer.from(bytes);
+		expect(await service.convertPdfToText(bytes)).toBe(expected);
+		expect(bytes.equals(original)).toBe(true);
+	});
+
 	it("extracts text while omitting numeric and boolean metadata dates", async () => {
 		const service = new PdfService({} as IAgentRuntime);
 		const info = await service.getDocumentInfo(

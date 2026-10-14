@@ -313,6 +313,25 @@ export async function warmWindowsCache(): Promise<void> {
 // throws -1728), and every window operation here is process-level (`window 1 of
 // proc`, matched by app/title term), so the owning app name + window title are
 // the only usable identifiers. The id is the title when present, else the app.
+/**
+ * Split a `head|||title|||tail` line at the first and last sentinel only. The
+ * head and tail are an app name, process name or numeric id, which never
+ * contain "|||", so everything between them is the window title — even a title
+ * that itself contains "|||" (e.g. a document named "a ||| b").
+ */
+export function splitWindowFields(entry: string): [string, string, string] {
+  const first = entry.indexOf("|||");
+  if (first === -1) return [entry, "", ""];
+  const last = entry.lastIndexOf("|||");
+  if (last === first)
+    return [entry.slice(0, first), entry.slice(first + 3), ""];
+  return [
+    entry.slice(0, first),
+    entry.slice(first + 3, last),
+    entry.slice(last + 3),
+  ];
+}
+
 function parseDarwinWindowEntry(entry: string): WindowInfo | null {
   // Split on the FIRST sentinel only: a window title may itself contain
   // "|||" (e.g. a document named "a ||| b"), and a plain split would silently
@@ -527,10 +546,9 @@ export async function getActiveWindow(): Promise<WindowInfo | null> {
           set proc to first process whose frontmost is true
           set procName to name of proc
           try
-            set winName to name of window 1 of proc
-            return procName & "|||" & winName & "|||" & winName
+            return procName & "|||" & (name of window 1 of proc)
           on error
-            return procName & "|||" & "" & "|||" & procName
+            return procName & "|||"
           end try
         end tell`;
       const out = execSync(`osascript -e '${script}'`, {
@@ -538,9 +556,7 @@ export async function getActiveWindow(): Promise<WindowInfo | null> {
         timeout: 8000,
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
-      const [app, title, id] = out.split("|||");
-      if (!app) return null;
-      return { id: id || "0", title: title ?? "", app };
+      return parseDarwinWindowEntry(out);
     }
     if (os === "linux") {
       if (!commandExists("xdotool")) return null;
@@ -559,9 +575,9 @@ export async function getActiveWindow(): Promise<WindowInfo | null> {
         if ($p) { "$($p.Id)|||$($p.MainWindowTitle)|||$($p.ProcessName)" }`;
       const out = (await runWindowsPowerShell(ps, 8000)).trim();
       if (!out) return null;
-      const [id, title, app] = out.split("|||");
+      const [id, title, app] = splitWindowFields(out);
       if (!id) return null;
-      return { id, title: title ?? "", app: app ?? "" };
+      return { id, title, app };
     }
   } catch {
     // error-policy:J4 null is the documented "no focused window / query

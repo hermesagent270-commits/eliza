@@ -41,6 +41,8 @@ export interface MapsProviderAdapter {
   searchPlaces(request: PlaceSearchRequest): Promise<PlacePage>;
   getPlace(providerPlaceId: string): Promise<PlaceRef | null>;
   planRoute(request: RoutePlanRequest): Promise<RoutePlan>;
+  /** Optional ordered alternatives; the first entry is the recommended route. */
+  planRouteAlternatives?(request: RoutePlanRequest): Promise<RoutePlan[]>;
 }
 
 export interface JsonMapsHttpAdapterOptions {

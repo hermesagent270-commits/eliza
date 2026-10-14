@@ -9,7 +9,7 @@
     "typecheck": "bun run typecheck:host && bun run typecheck:renderer && bun run typecheck:consumer-build",
     "check:source-artifacts": "node scripts/check-source-artifacts.ts",
     "test": "bun run test:renderer && bun run test:host",
-    "test:script-suites": "bun run test:consumer-host && python3 scripts/local-speech/test-runner.py && node scripts/run-script-tests.ts && bun test ./src/runtime/mobile-auth-composition.integration.test.ts ./src/runtime/mobile-workflow-process-host.integration.test.ts",
+    "test:script-suites": "bun run test:consumer-host && node scripts/run-script-tests.ts && bun test ./src/runtime/mobile-auth-composition.integration.test.ts ./src/runtime/mobile-workflow-process-host.integration.test.ts",
     "test:auth": "node ../scripts/run-vitest.ts run --config vitest.host.config.ts --no-file-parallelism src/api/auth src/api/auth-bootstrap-routes src/services/auth-store src/services/auth-record-store src/cli/program/register.auth",
     "test:local-provisioning": "node scripts/run-node-tsx.ts scripts/check-real-local-provisioning.ts",
     "test:local-chat": "node scripts/run-node-tsx.ts scripts/check-real-local-chat.ts",
@@ -205,7 +205,7 @@
     "test:host": "node ../scripts/run-vitest.ts run --config vitest.host.config.ts && bun run test:script-suites",
     "typecheck:renderer": "tsc --noEmit -p tsconfig.typecheck.json",
     "typecheck:host": "tsc --noEmit -p tsconfig.host.json",
-    "test:tts:standalone": "bun --no-install --conditions=eliza-source scripts/qualify-standalone-kokoro.ts",
+    "test:speech:standalone": "bun --no-install --conditions=eliza-source scripts/qualify-standalone-speech.ts",
     "build:consumer-tasks": "node scripts/build-consumer-task-runtime.mjs",
     "typecheck:consumer-build": "tsc --noEmit -p scripts/tsconfig.consumer-build.json",
     "test:consumer-host": "node --test test/native-host/*.test.mjs scripts/mobile/android/build-consumer.test.mjs"

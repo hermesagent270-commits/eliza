@@ -10,6 +10,7 @@ import {
   readRequestBody,
   sendJson as sendJsonResponse,
 } from "@elizaos/host";
+import { splitWindowFields } from "../platform/windows-list.js";
 
 interface SandboxExecResult {
   exitCode: number;
@@ -854,11 +855,11 @@ function listWindows(): Array<{
         .split(", ")
         .filter(Boolean)
         .map((entry) => {
-          const parts = entry.split("|||");
+          const [app, title, id] = splitWindowFields(entry);
           return {
-            app: parts[0] ?? "unknown",
-            title: parts[1] ?? "unknown",
-            id: parts[2] ?? "0",
+            app: app || "unknown",
+            title: title || "unknown",
+            id: id || "0",
           };
         });
     } catch (err) {

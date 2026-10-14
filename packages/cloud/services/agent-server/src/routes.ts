@@ -579,13 +579,7 @@ export function createRoutes(manager: AgentManager, sharedSecret: string) {
           : undefined;
 
       try {
-        const response = await manager.handleMessage(
-          params.id,
-          userId,
-          text,
-          metadata,
-        );
-        return { response };
+        return await manager.handleMessage(params.id, userId, text, metadata);
       } catch (err: unknown) {
         // error-policy:J1 translate the agent-server HTTP boundary into an explicit status.
         const message = err instanceof Error ? err.message : String(err);

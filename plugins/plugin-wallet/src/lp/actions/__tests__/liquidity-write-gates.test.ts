@@ -240,6 +240,39 @@ describe("LIQUIDITY write gates", () => {
     expect(lp.openPosition).not.toHaveBeenCalled();
   });
 
+  it("binds the pending confirmation to the EVM chain and names it, so a yes on another chain re-pends", async () => {
+    const { runtime, lp } = lpRuntime();
+    const { prompts, callback } = recordingCallback();
+    const close = (chainId: number) => ({
+      action: "close",
+      chain: "evm",
+      chainId,
+      dex: "uniswap",
+      pool: BASE_USDC,
+      position: "123",
+    });
+
+    const first = await liquidityAction.handler(
+      runtime,
+      message("close my LP position"),
+      undefined,
+      close(8453),
+      callback,
+    );
+    expect(first?.data?.requiresConfirmation).toBe(true);
+    expect(prompts[0]).toContain("Base 8453");
+
+    const second = await liquidityAction.handler(
+      runtime,
+      message("yes"),
+      undefined,
+      close(1),
+      callback,
+    );
+    expect(second?.data?.requiresConfirmation).toBe(true);
+    expect(lp.closePosition).not.toHaveBeenCalled();
+  });
+
   it("binds pending confirmation to dex and range, so a yes with swapped protocol re-pends", async () => {
     const { runtime, lp } = lpRuntime();
     const { prompts, callback } = recordingCallback();

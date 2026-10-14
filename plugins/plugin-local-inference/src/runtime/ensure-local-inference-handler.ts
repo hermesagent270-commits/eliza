@@ -90,7 +90,11 @@ import {
 	VISION_IMAGE_MAX_BYTES,
 } from "../services/vision/image-input";
 import type { VisionImageInput } from "../services/vision/types";
-import { decodeMonoPcm16Wav, type TranscriptionAudio } from "../services/voice";
+import {
+	decodeMonoPcm16Wav,
+	encodeMonoPcm16Wav,
+	type TranscriptionAudio,
+} from "../services/voice";
 import { extractRequestedKokoroVoiceId } from "../services/voice/requested-voice.js";
 import {
 	createVerifiedBgeContext,
@@ -1351,6 +1355,7 @@ function getBionicHostLoader(runtime: IAgentRuntime): BionicHostLoader | null {
 	if (
 		svc &&
 		typeof (svc as BionicHostLoader).transcribe === "function" &&
+		typeof (svc as BionicHostLoader).synthesize === "function" &&
 		typeof (svc as BionicHostLoader).describeImage === "function"
 	) {
 		return svc as BionicHostLoader;
@@ -1428,9 +1433,37 @@ function makeBionicTranscriptionHandler(): TranscriptionHandler {
 		const transcript = await loader.transcribe({
 			pcmBase64: float32ToBase64LE(audio.pcm),
 			sampleRate: audio.sampleRate,
+			signal,
 		});
 		throwIfAborted(signal);
 		return transcript;
+	};
+}
+
+/**
+ * Bionic-delegated TEXT_TO_SPEECH: the fused Paradee head lives in the app
+ * process, so the text goes to the bionic host (op="tts") and the PCM comes
+ * back. Aborting the request's signal cancels the native synthesis.
+ */
+function makeBionicTextToSpeechHandler(): TextToSpeechHandler {
+	return async (runtime, params) => {
+		const signal = extractSpeechSignal(params);
+		throwIfAborted(signal);
+		const text = extractSpeechText(params).trim();
+		if (text.length === 0) {
+			throw new Error(
+				"[local-inference] TEXT_TO_SPEECH text must be non-empty",
+			);
+		}
+		const loader = getBionicHostLoader(runtime);
+		if (!loader) {
+			throw new Error(
+				"[local-inference] bionic-host TEXT_TO_SPEECH requires the bionic-host loader (localInferenceLoader service)",
+			);
+		}
+		const { pcm, sampleRate } = await loader.synthesize({ text, signal });
+		throwIfAborted(signal);
+		return encodeMonoPcm16Wav(pcm, sampleRate);
 	};
 }
 
@@ -1927,7 +1960,9 @@ export async function ensureLocalInferenceHandler(
 		try {
 			runtimeWithRegistration.registerModel(
 				ModelType.TEXT_TO_SPEECH,
-				makeTextToSpeechHandler(),
+				bionicHostRegistered
+					? makeBionicTextToSpeechHandler()
+					: makeTextToSpeechHandler(),
 				provider,
 				LOCAL_INFERENCE_PRIORITY,
 			);

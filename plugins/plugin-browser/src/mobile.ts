@@ -195,7 +195,9 @@ export class BrowserService extends Service {
       // error-policy:J2 uncertain native effects must never be replayed in another browser.
       if (
         isBrowserDispatchFailure(error) ||
-        isIdempotentBrowserSubaction(command.subaction)
+        isIdempotentBrowserSubaction(command.subaction, {
+          script: command.script,
+        })
       )
         throw error;
       throw new BrowserDispatchFailure(

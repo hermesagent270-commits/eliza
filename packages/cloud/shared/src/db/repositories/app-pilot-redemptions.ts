@@ -1,9 +1,10 @@
-/** Durable sponsored-pilot admission. Does not publish service access or funding. */
+/** Atomically records sponsored-pilot admission, access and monthly usage allowance. */
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { sqlRows } from "../execute-helpers";
 import { writeTransaction } from "../helpers";
 import type { AppPilotRedemption } from "../schemas/app-pilot-redemptions";
+import { publishAppPilotAccess } from "./app-pilot-access";
 import {
   appBillingConflict,
   lockAppBillingScope,
@@ -103,6 +104,7 @@ export class AppPilotRedemptionsRepository {
         RETURNING *`,
       );
       if (!redemption) appBillingConflict("Pilot campaign is expired, revoked or full");
+      await publishAppPilotAccess(tx, scope, redemption.id);
       return { redemption, replayed: false };
     });
   }

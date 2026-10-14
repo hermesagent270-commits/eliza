@@ -1682,7 +1682,17 @@ export function createScheduledTaskRunner(
     const untilIso = payload?.untilIso;
     let newFireAtIso: string;
     if (typeof untilIso === "string") {
-      newFireAtIso = new Date(untilIso).toISOString();
+      const untilMs = Date.parse(untilIso);
+      if (!Number.isFinite(untilMs) || untilMs <= now().getTime()) {
+        throw new ElizaError(
+          "snooze: untilIso must be a parseable timestamp in the future",
+          {
+            code: "SCHEDULED_TASK_SNOOZE_PROJECTION_INVALID",
+            context: { untilIso },
+          },
+        );
+      }
+      newFireAtIso = new Date(untilMs).toISOString();
     } else if (typeof minutes === "number") {
       if (minutes <= 0) {
         throw new Error("snooze: provide minutes or untilIso");

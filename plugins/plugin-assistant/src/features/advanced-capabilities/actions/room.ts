@@ -418,6 +418,13 @@ async function applyOp(args: {
       args.op === "mute"
         ? muteUntilIsoFromDuration(args.durationMinutes)
         : undefined;
+    // The state lives on the agent's participant row. A room the agent has
+    // no row in (for example, one a connector created on join) would take the
+    // update as a no-op while the reply says the room is muted.
+    await args.runtime.ensureParticipantInRoom(
+      args.runtime.agentId,
+      args.roomId,
+    );
     await args.runtime.updateParticipantUserState(
       args.roomId,
       args.runtime.agentId,

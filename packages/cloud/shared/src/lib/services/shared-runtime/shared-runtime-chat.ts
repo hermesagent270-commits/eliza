@@ -1132,6 +1132,7 @@ async function admitTurn(
   }
   try {
     rateLimited = await enforceOrgRateLimit(agent.organization_id, "completions", {
+      userId: agent.user_id,
       cacheOnly: Boolean(executionCtx),
       executionCtx,
       config:

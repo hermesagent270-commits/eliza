@@ -9,6 +9,7 @@
  * per channel. `registerEscalationChannel` appends newly paired channels to the
  * escalation order in eliza.json.
  */
+
 import {
   createSerialise,
   ElizaError,
@@ -27,6 +28,7 @@ import type {
   OwnerContactEntry,
   OwnerContactsConfig,
 } from "@elizaos/host/protocol";
+import { mirrorSavedConfigToLive } from "../api/config-state.ts";
 import { loadElizaConfig, saveElizaConfig } from "../config/config.ts";
 import {
   loadOwnerContactRoutingHints,
@@ -307,6 +309,9 @@ export function registerEscalationChannel(channelName: string): boolean {
     escalation.channels = existing;
 
     saveElizaConfig(cfg);
+    // The next settings save writes the API server's in-memory config; mirror
+    // the new channel into it, or that save erases the channel again.
+    mirrorSavedConfigToLive(cfg);
     logger.info(
       `[escalation] Registered channel "${trimmed}" -- escalation order: [${existing.join(", ")}]`,
     );

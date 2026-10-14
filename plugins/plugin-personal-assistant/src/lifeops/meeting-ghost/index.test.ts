@@ -76,6 +76,45 @@ describe("meeting ghost attendee matching", () => {
     expect(result.followUpApprovals).toHaveLength(0);
   });
 
+  it("prefers a whole-word match over a substring of another attendee", () => {
+    const result = analyze(
+      [
+        { name: "Ann Lee", email: "ann.lee@example.com" },
+        { name: "Joanne Park", email: "joanne.park@example.com" },
+      ],
+      [seg("Ann Lee", 0, "Ann will send the report by Friday.")],
+    );
+    expect(result.commitments[0]?.recipientEmail).toBe("ann.lee@example.com");
+    expect(result.followUpApprovals[0]?.payload).toMatchObject({
+      to: ["ann.lee@example.com"],
+    });
+  });
+
+  it("keeps a fragment match when no whole-word match exists", () => {
+    const result = analyze(
+      [
+        { name: "Ann Lee", email: "ann.lee@example.com" },
+        { name: "Joanne Park", email: "joanne.park@example.com" },
+      ],
+      [seg("Joanne Park", 0, "Joann will send the report by Friday.")],
+    );
+    expect(result.commitments[0]?.recipientEmail).toBe(
+      "joanne.park@example.com",
+    );
+  });
+
+  it("does not choose between two whole-word matches", () => {
+    const result = analyze(
+      [
+        { name: "Ann Lee", email: "ann.lee@example.com" },
+        { name: "Ann Park", email: "ann.park@example.com" },
+      ],
+      [seg("Ann Lee", 0, "Ann will send the report by Friday.")],
+    );
+    expect(result.commitments[0]?.recipientEmail).toBeNull();
+    expect(result.followUpApprovals).toHaveLength(0);
+  });
+
   it("matches canonically equivalent names without dropping vowel marks", () => {
     const result = analyze(
       [{ name: "José", email: "jose@example.com" }],

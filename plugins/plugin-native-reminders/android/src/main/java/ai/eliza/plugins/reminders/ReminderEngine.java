@@ -45,5 +45,6 @@ public final class ReminderEngine {
  public JSONObject pendingTap()throws Exception{return taps().pending();}
  public void captureTap(String token)throws Exception{taps().capture(token);}
  public JSONObject consumeTap(String token)throws Exception{return taps().consume(token);}
+ public void releaseQuestionTap(String token)throws Exception{taps().releaseQuestion(token);}
  public void dismissTap(String token)throws Exception{taps().dismiss(token);}
 }

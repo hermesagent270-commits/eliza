@@ -9,6 +9,10 @@
 import { ElizaError } from "@elizaos/core";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
+  QUOTA_RESERVED_STATUSES,
+  QUOTA_USED_STATUSES,
+} from "../../lib/constants/agent-sandbox-quota";
+import {
   type ActiveBillableResource,
   activeBillingService,
 } from "../../lib/services/active-billing";
@@ -209,8 +213,8 @@ export async function readPrimaryAccountBillingSnapshot(
           ),
         tx
           .select({
-            used: sql<string>`COALESCE(count(*) FILTER (WHERE ${agentSandboxes.status} IN ('running','stopped','sleeping')), 0)::text`,
-            reserved: sql<string>`COALESCE(count(*) FILTER (WHERE ${agentSandboxes.status} IN ('pending','provisioning')), 0)::text`,
+            used: sql<string>`COALESCE(count(*) FILTER (WHERE ${inArray(agentSandboxes.status, QUOTA_USED_STATUSES)}), 0)::text`,
+            reserved: sql<string>`COALESCE(count(*) FILTER (WHERE ${inArray(agentSandboxes.status, QUOTA_RESERVED_STATUSES)}), 0)::text`,
             deleting: sql<string>`COALESCE(count(*) FILTER (WHERE ${agentSandboxes.status} IN ('deletion_pending','deletion_failed')), 0)::text`,
           })
           .from(agentSandboxes)

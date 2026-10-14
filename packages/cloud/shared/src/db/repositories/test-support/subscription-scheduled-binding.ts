@@ -71,6 +71,8 @@ export async function assertScheduledPaidBinding(source: BillingSubscription, co
   });
   expect(resolved.environment.STRIPE_PLUS_MONTHLY_PRICE_ID).toBe("price_plus");
   expect(resolved.environment.STRIPE_PLUS_PRODUCT_ID).toBe("prod_plus");
+  if (period.subscription_revision === null)
+    throw new Error("Scheduled invoice fixture requires its subscription revision");
   for (const changed of [
     { ...input, revisions: revisions.slice(1) },
     { ...input, revisions: revisions.filter((_, index) => index !== 1) },

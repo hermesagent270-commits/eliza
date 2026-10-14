@@ -32,6 +32,11 @@ type GoogleChatMultiAccountConfig = GoogleChatAccountConfig & {
 
 function stringSetting(runtime: IAgentRuntime, key: string): string | undefined {
   const value = runtime.getSetting(key);
+  // getSetting returns a saved "true"/"false" as a boolean. Keep it, or a
+  // switch turned off in Settings falls back to its default.
+  if (typeof value === "boolean" || typeof value === "number") {
+    return String(value);
+  }
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 

@@ -103,3 +103,70 @@ it("sending into an existing Slack room keeps its world, type, and routing metad
     await f.cleanup();
   }
 });
+
+it("reading recent messages reports connectors that could not be read", async () => {
+  const f = await createIsolatedTestDatabase("message-read-channel-failures");
+  const userId = "55555555-5555-4555-8555-555555555555" as UUID;
+  const roomId = "66666666-6666-4666-8666-666666666666" as UUID;
+  let slackWorks = false;
+  try {
+    const register = (source: string, label: string, fails: () => boolean) =>
+      f.runtime.registerMessageConnector({
+        source,
+        label,
+        capabilities: ["send_message", "read_messages"],
+        supportedTargetKinds: ["channel"],
+        contexts: ["social"],
+        sendHandler: async () => undefined,
+        listRecentTargets: async () => {
+          if (fails()) throw new Error(`${label} token was revoked`);
+          return [{ target: { source, channelId: "C1" } }];
+        },
+        fetchMessages: async () => [
+          {
+            id: stringToUuid(`${source}:m1`),
+            entityId: userId,
+            agentId: f.testAgentId,
+            roomId,
+            content: { text: `hello from ${label}`, source },
+            createdAt: 1_760_000_000_000,
+          } as Memory,
+        ],
+      });
+    register("discord", "Discord", () => true);
+    register("slack", "Slack", () => !slackWorks);
+
+    const message: Memory = {
+      id: "88888888-8888-4888-8888-888888888888" as UUID,
+      agentId: f.testAgentId,
+      entityId: userId,
+      roomId,
+      content: { text: "what are my recent messages", source: "client_chat" },
+    };
+    const read = () =>
+      messageAction.handler(f.runtime, message, undefined, {
+        parameters: { action: "read_channel" },
+      });
+
+    // Every connector failed: a failure, not "No recent conversations found."
+    const allFailed = await read();
+    expect(allFailed).toMatchObject({
+      success: false,
+      values: { error: "MESSAGE_READ_CHANNEL_FAILED" },
+    });
+    expect(allFailed?.text).toContain("Discord token was revoked");
+    expect(allFailed?.text).toContain("Slack token was revoked");
+
+    // One connector failed: the messages are returned and the failure named.
+    slackWorks = true;
+    const partial = await read();
+    expect(partial).toMatchObject({ success: true });
+    expect(partial?.text).toContain("Could not read: discord");
+    expect(partial?.data).toMatchObject({
+      sources: [{ source: "slack", count: 1 }],
+      failedSources: [{ source: "discord" }],
+    });
+  } finally {
+    await f.cleanup();
+  }
+});

@@ -24,10 +24,12 @@ import { createMcpMemory } from "./mcp";
 
 function getMimeTypeToContentType(mimeType: string | undefined): ContentType | undefined {
   if (!mimeType) return undefined;
-  if (mimeType.startsWith("image/")) return ContentType.IMAGE;
-  if (mimeType.startsWith("video/")) return ContentType.VIDEO;
-  if (mimeType.startsWith("audio/")) return ContentType.AUDIO;
-  if (mimeType.includes("pdf") || mimeType.includes("document")) return ContentType.DOCUMENT;
+  const normalizedMimeType = mimeType.toLowerCase();
+  if (normalizedMimeType.startsWith("image/")) return ContentType.IMAGE;
+  if (normalizedMimeType.startsWith("video/")) return ContentType.VIDEO;
+  if (normalizedMimeType.startsWith("audio/")) return ContentType.AUDIO;
+  if (normalizedMimeType.includes("pdf") || normalizedMimeType.includes("document"))
+    return ContentType.DOCUMENT;
   return undefined;
 }
 function resourceAttachment(

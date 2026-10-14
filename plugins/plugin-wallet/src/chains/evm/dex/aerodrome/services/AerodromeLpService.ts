@@ -82,11 +82,10 @@ export class AerodromeLpService extends Service implements IEvmLpService {
   }
 
   private getWalletClient(privateKey: `0x${string}`): EvmWalletClient {
-    const cacheKey = privateKey.slice(0, 10);
+    const account = privateKeyToAccount(privateKey);
+    const cacheKey = account.address;
     let client = this.walletClients.get(cacheKey);
     if (client) return client;
-
-    const account = privateKeyToAccount(privateKey);
 
     client = createWalletClient({
       chain: AERODROME_CHAIN,

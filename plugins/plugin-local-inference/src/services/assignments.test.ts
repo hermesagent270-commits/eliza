@@ -126,6 +126,35 @@ describe("local inference assignments", () => {
 		expect(await readAssignments()).toEqual({});
 	});
 
+	it("keeps both of two slot changes made at the same time", async () => {
+		for (let trial = 0; trial < 10; trial++) {
+			process.env.ELIZA_STATE_DIR = fs.mkdtempSync(
+				path.join(os.tmpdir(), "eliza-assignments-test-"),
+			);
+			await Promise.all([
+				setAssignment("TEXT_SMALL", "eliza-1-4b"),
+				setAssignment("TEXT_LARGE", "eliza-1-2b"),
+			]);
+			expect(await readAssignments()).toEqual({
+				TEXT_SMALL: "eliza-1-4b",
+				TEXT_LARGE: "eliza-1-2b",
+			});
+		}
+	});
+
+	it("keeps a slot the user picks while a finished download fills defaults", async () => {
+		for (let trial = 0; trial < 10; trial++) {
+			process.env.ELIZA_STATE_DIR = fs.mkdtempSync(
+				path.join(os.tmpdir(), "eliza-assignments-test-"),
+			);
+			await Promise.all([
+				setAssignment("TEXT_SMALL", "eliza-1-4b"),
+				ensureDefaultAssignment("eliza-1-2b"),
+			]);
+			expect((await readAssignments()).TEXT_SMALL).toBe("eliza-1-4b");
+		}
+	});
+
 	it("drops stale custom ids while preserving curated assignments", async () => {
 		process.env.ELIZA_STATE_DIR = fs.mkdtempSync(
 			path.join(os.tmpdir(), "eliza-assignments-test-"),

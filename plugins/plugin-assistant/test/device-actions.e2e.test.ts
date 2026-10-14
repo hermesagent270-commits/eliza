@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -1038,6 +1038,205 @@ test("device approval REST lifecycle survives restart and never duplicates claim
       }
     }
     {
+      // Real authenticated HTTP, durable SQL claims and immutable typed SMS receipts.
+      // The transport receipt is synthetic; no SIM operation or delivery is asserted.
+      const service = new DeviceActionService(runtimeState.runtime);
+      const c = { ...credentials, capabilities: ["sms.send.v1"] };
+      const operation = {
+        type: "sms_send",
+        recipients: ["+15555550123"],
+        body: "Exact SMS fixture",
+        subscriptionId: 3,
+      };
+      const sendRequest = (path: string, body?: unknown) =>
+        request(path, body, "a", deviceKey, "sms.send.v1");
+      await expect(
+        service.propose(credentials, operation, "sms-no-cap", "fixture"),
+      ).rejects.toThrow();
+      for (const bad of [
+        { ...operation, recipients: ["+15555550123", "+15555550123"] },
+        { ...operation, subscriptionId: -1 },
+        { ...operation, body: "x".repeat(1601) },
+      ])
+        await expect(
+          service.propose(c, bad, "sms-invalid", "fixture"),
+        ).rejects.toThrow();
+      for (const status of [
+        "submitted",
+        "sent",
+        "delivered",
+        "unknown",
+        "failed",
+        "cancelled",
+        "denied",
+      ] as const) {
+        const key = `sms-${status}`;
+        const proposal = await service.propose(c, operation, key, "fixture");
+        const item = (await sendRequest("/proposals")).body.proposals.find(
+          (p: any) => p.id === proposal.id,
+        );
+        expect(
+          (
+            await sendRequest(`/proposals/${item.id}/claim`, {
+              digest: item.digest,
+            })
+          ).status,
+        ).toBe(409);
+        expect(
+          (
+            await sendRequest(`/proposals/${item.id}/decision`, {
+              digest: item.digest,
+              decision: "approve",
+            })
+          ).status,
+        ).toBe(200);
+        const claim = await sendRequest(`/proposals/${item.id}/claim`, {
+          digest: item.digest,
+        });
+        expect(claim.status).toBe(200);
+        const result = {
+          kind: "sms-send",
+          operationId: item.id,
+          subscriptionId: 3,
+          bindingHash: createHash("sha256")
+            .update(
+              JSON.stringify({
+                body: operation.body,
+                recipients: operation.recipients,
+                subscriptionId: 3,
+                type: "sms_send",
+              }),
+            )
+            .digest("hex"),
+          status,
+          createdAt: Date.now(),
+          parts: ["cancelled", "denied"].includes(status)
+            ? []
+            : [
+                {
+                  index: 0,
+                  recipientIndex: 0,
+                  partIndex: 0,
+                  sent: ["sent", "delivered"].includes(status)
+                    ? "success"
+                    : "unknown",
+                  delivery: status === "delivered" ? "success" : "unknown",
+                },
+              ],
+        };
+        const applied = ["submitted", "sent", "delivered"].includes(status);
+        const receipt = {
+          outcome: applied
+            ? "applied"
+            : ["cancelled", "denied"].includes(status)
+              ? "failed"
+              : "unknown",
+          operationId: item.id,
+          result,
+        };
+        const endpoint = `/proposals/${item.id}/receipt`;
+        const post = (r: unknown) =>
+          sendRequest(endpoint, {
+            digest: item.digest,
+            attemptId: claim.body.proposal.execution.attemptId,
+            receipt: r,
+          });
+        for (const changed of [
+          { ...result, bindingHash: "a".repeat(64) },
+          { ...result, subscriptionId: 4 },
+          { ...result, operationId: randomUUID() },
+          {
+            ...result,
+            status: "delivered",
+            parts: [
+              {
+                index: 0,
+                recipientIndex: 0,
+                partIndex: 0,
+                sent: "success",
+                delivery: "unknown",
+              },
+            ],
+          },
+          {
+            ...result,
+            status: "submitted",
+            parts: [
+              {
+                index: 0,
+                recipientIndex: 0,
+                partIndex: 0,
+                sent: "failed",
+                delivery: "unknown",
+              },
+            ],
+          },
+        ])
+          expect((await post({ ...receipt, result: changed })).status).toBe(
+            409,
+          );
+        expect(
+          (await post({ ...receipt, operationId: randomUUID() })).status,
+        ).toBe(409);
+        expect(
+          (await post({ ...receipt, outcome: applied ? "unknown" : "applied" }))
+            .status,
+        ).toBe(409);
+        const recorded = await post(receipt);
+        expect(recorded.status).toBe(200);
+        expect(recorded.body.proposal.state).toBe(
+          applied ? "done" : "reconciliation_required",
+        );
+        expect((await post(receipt)).status).toBe(200);
+        if (status === "unknown" || status === "failed") {
+          expect(
+            (
+              await sendRequest(`/proposals/${item.id}/reconciliation`, {
+                digest: item.digest,
+                attemptId: claim.body.proposal.execution.attemptId,
+                resolution: {
+                  confirmed: true,
+                  outcome: "not_applied",
+                  operationId: item.id,
+                  result,
+                },
+              })
+            ).status,
+          ).toBe(409);
+        }
+        expect(
+          (
+            await sendRequest(`/proposals/${item.id}/claim`, {
+              digest: item.digest,
+            })
+          ).status,
+        ).toBe(409);
+        const retrieved = await withDeviceActionTurn(
+          runtimeState.runtime,
+          c,
+          () =>
+            proposeDeviceAction.handler(
+              runtimeState.runtime,
+              memory,
+              undefined,
+              {
+                parameters: { operation, operationKey: key, reason: "fixture" },
+              },
+            ),
+        );
+        if (applied) {
+          expect(retrieved && retrieved.data).toMatchObject({
+            executed: false,
+            result,
+          });
+          expect(retrieved && retrieved.effectReceipts?.[0]).toMatchObject({
+            operation: "device.sms.submit",
+            resource: { kind: "device.sms.submission" },
+          });
+        }
+      }
+    }
+    {
       const capability = "clock.handoff.v1";
       const allCapabilities =
         "calendar.local-event.v1,notes.local-record.v1,reminders.local-record.v1,maps.selected-read.v1,clock.handoff.v1";
@@ -1059,6 +1258,7 @@ test("device approval REST lifecycle survives restart and never duplicates claim
           "reminders.create.v1",
           "clock.handoff.v2",
           "clock.alarms.v1",
+          "sms.send.v1",
           "notes.search.v1",
           "calendar.availability-read.v1",
           "device.named-target.v1",

@@ -25,3 +25,13 @@ short great-circle segments, including routes across the date line. The optional
 map plane draws selectable pins and a moving-device heading, and can follow the
 position during navigation. Hosts still own location permission, voice policy,
 provider configuration and presentation.
+
+## Eliza Cloud Maps
+
+With `ELIZAOS_CLOUD_API_KEY` set (and `ELIZAOS_CLOUD_BASE_URL` for a non-production
+Cloud), the service registers `ElizaCloudMapsAdapter` for `/api/v1/maps/*`: place
+search, details and routes with alternatives. Cloud supplies data only. The phone host
+registers a `MapsDeviceNavigation` with `MapsService.registerDeviceNavigation`; the
+`MAPS_SELECT` and `MAPS_NAVIGATION_START`, `_REROUTE` and `_STOP` actions ask it and
+report its state. Without one they return `MAPS_DEVICE_UNAVAILABLE`. GPS, the active
+route and guidance stay on the device; `MAPS_SHARE` still needs the user's confirmation.

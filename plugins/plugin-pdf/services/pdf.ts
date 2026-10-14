@@ -10,7 +10,7 @@
 
 import type { IAgentRuntime } from "@elizaos/core";
 import { ElizaError, ModelType, Service, ServiceType } from "@elizaos/core";
-import { getDocumentProxy, getResolvedPDFJS, renderPageAsImage } from "unpdf";
+import { extractText, getDocumentProxy, getResolvedPDFJS, renderPageAsImage } from "unpdf";
 import type {
   PdfCompleteDocument,
   PdfCompleteExtractionOptions,
@@ -390,19 +390,16 @@ export class PdfService extends Service {
   async convertPdfToText(pdfBuffer: Buffer | Uint8Array): Promise<string> {
     const uint8Array = validatePdfInput(pdfBuffer);
     const pdf = await getDocumentProxy(uint8Array);
-    const numPages = requirePdfPageCount(pdf.numPages);
-
-    const textPages: string[] = [];
-
-    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-      const page = await pdf.getPage(pageNum);
-      const textContent = await page.getTextContent();
-      const pageText = collectTextStrings(textContent.items).join(" ");
-      textPages.push(pageText);
+    try {
+      // Keep the existing page-count boundary validation before extraction.
+      requirePdfPageCount(pdf.numPages);
+      // PDF text items are font runs, not words. Reuse the parser's spacing
+      // and line-break handling; older unpdf merged mode collapses newlines.
+      const { text } = await extractText(pdf, { mergePages: false });
+      return this.cleanUpContent(text.join("\n"));
+    } finally {
+      await pdf.loadingTask.destroy();
     }
-
-    const rawText = textPages.join("\n");
-    return this.cleanUpContent(rawText);
   }
 
   async convertPdfToPositionedText(

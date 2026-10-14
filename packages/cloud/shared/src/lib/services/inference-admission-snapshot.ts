@@ -57,6 +57,7 @@ export function inferenceRateLimitConfig(
     windowMs: 60_000,
     maxRequests: snapshot.rateLimits[rpmKey],
     authority: snapshot.authority,
+    ...(typeof snapshot.planKey === "string" && { planKey: snapshot.planKey }),
   };
 }
 
@@ -83,6 +84,7 @@ export function inferenceAdmissionSnapshotFromPolicy(
       standardRpm: requireOrganizationRateTier(policy).standardRpm,
       strictRpm: requireOrganizationRateTier(policy).strictRpm,
     },
+    planKey: requireOrganizationRateTier(policy).tierName,
   };
 }
 

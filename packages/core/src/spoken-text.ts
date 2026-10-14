@@ -43,6 +43,8 @@ function stripThinkingAndMarkup(input: string): string {
 	text = text.replace(NON_SPEECH_BLOCK, " ");
 	text = text.replace(INCOMPLETE_NON_SPEECH_TAG, " ");
 	text = text.replace(/```[\s\S]*?```/g, " ");
+	// An unterminated fence swallows to end-of-input; TTS must never speak code.
+	text = text.replace(/```[\s\S]*$/, " ");
 	text = text.replace(/`([^`]+)`/g, "$1");
 	text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
 	text = text.replace(/<(?:\/?[A-Za-z]|!)[^<>\n]*>/g, " ");

@@ -25,7 +25,10 @@ describe("gateway routing facade conformance", () => {
       port: 0,
       fetch: async (request) => {
         messages.push((await request.json()) as Record<string, unknown>);
-        return Response.json({ response: "agent completed the turn" });
+        return Response.json({
+          response: "agent completed the turn",
+          mediaUrls: ["https://cdn.example.com/cat.png"],
+        });
       },
     });
     servers.push(server);
@@ -48,7 +51,10 @@ describe("gateway routing facade conformance", () => {
         "hello telegram",
         { platformName: "telegram", platformRecordId: "telegram-1" },
       ),
-    ).resolves.toBe("agent completed the turn");
+    ).resolves.toEqual({
+      text: "agent completed the turn",
+      mediaUrls: ["https://cdn.example.com/cat.png"],
+    });
     expect(messages).toEqual([
       {
         userId: "user-1",

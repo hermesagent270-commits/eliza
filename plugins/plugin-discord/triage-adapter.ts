@@ -129,6 +129,8 @@ interface DiscordDraftContext {
 	readonly request: DraftRequest;
 	readonly channelId: string;
 	readonly accountId?: string;
+	/** Discord message id the draft answers; sent as the reply reference. */
+	readonly replyToExternalMessageId?: string;
 	readonly preview: string;
 }
 
@@ -345,6 +347,9 @@ export class DiscordTriageAdapter extends BaseMessageAdapter {
 			request: draft,
 			channelId,
 			accountId,
+			...(original?.externalId
+				? { replyToExternalMessageId: original.externalId }
+				: {}),
 			preview,
 		});
 		return { draftId, preview };
@@ -367,6 +372,9 @@ export class DiscordTriageAdapter extends BaseMessageAdapter {
 		const content: Content = {
 			text: draft.request.body,
 			source: "discord",
+			...(draft.replyToExternalMessageId
+				? { replyToExternalMessageId: draft.replyToExternalMessageId }
+				: {}),
 		};
 		const sent = await service.handleSendMessage(runtime, target, content);
 		const disposition = inspectSendHandlerResult(sent);

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * Domain renewal billing (#10245).
  *
@@ -90,30 +91,43 @@ async function renewOne(domain: ManagedDomain): Promise<DomainRenewalResult> {
   }
 
   // Idempotency: never charge the same (domain, period) twice.
-  if (
-    await creditTransactionsRepository.hasUnrefundedDomainRenewal(
-      domain.organizationId,
-      domain.domain,
-      renewalPeriod,
-    )
-  ) {
+  const charges = await creditTransactionsRepository.getDomainRenewalCharges(
+    domain.organizationId,
+    domain.domain,
+    renewalPeriod,
+  );
+  if (charges.debits > charges.refunds) {
     return { ...base, outcome: "already_charged" };
   }
 
+  const runId = randomUUID();
   const debitMetadata = {
     type: "domain_renewal" as const,
     domain: domain.domain,
     renewalPeriod,
     managedDomainId: domain.id,
+    renewalRunId: runId,
   };
 
   // Debit BEFORE the registrar action so a renewal can never run for free.
+  // The key names the charge for this period and attempt (the refund count
+  // grows after a registrar failure, so a retry is a new charge): two runs
+  // that overlap share one debit instead of charging twice.
   const debit = await creditsService.deductCredits({
     organizationId: domain.organizationId,
     amount: renewalPriceCents / 100,
     description: `domain renewal: ${domain.domain}`,
     metadata: debitMetadata,
+    stripePaymentIntentId: `domain_renewal:${domain.id}:${renewalPeriod}:${charges.refunds}`,
   });
+  if (
+    debit.success &&
+    (debit.transaction?.metadata as { renewalRunId?: string } | undefined)?.renewalRunId !== runId
+  ) {
+    // Another run committed this charge first; it owns the registrar call and
+    // any refund.
+    return { ...base, outcome: "already_charged" };
+  }
   if (!debit.success) {
     // Lapse policy: stop auto-renewing on our Cloudflare account, warn the org.
     await managedDomainsService.setAutoRenew(domain.id, false);

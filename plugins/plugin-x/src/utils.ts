@@ -4,17 +4,15 @@
  * `parseActionResponseFromText` (extracts the model's like/retweet/quote/reply
  * choice). Re-exports the shared API error handler.
  */
-import fs from "node:fs";
-import path from "node:path";
 import type { Media } from "@elizaos/core";
 import {
   type Content,
   createUniqueUuid,
-  DEFAULT_CONNECTOR_ATTACHMENT_MAX_BYTES,
   ElizaError,
-  fetchRemoteMedia,
   logger,
   type Memory,
+  type ResolveOutboundAttachmentOptions,
+  resolveOutboundAttachmentBytes,
   type UUID,
 } from "@elizaos/core";
 import twitterText from "twitter-text";
@@ -133,81 +131,24 @@ export const isValidTweet = (tweet: Tweet): boolean => {
   );
 };
 
-async function readLocalAttachment(resolvedPath: string): Promise<Buffer> {
-  const handle = await fs.promises.open(resolvedPath, "r");
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) {
-      throw new Error(
-        `File not found: ${resolvedPath}. Make sure the path is correct.`,
-      );
-    }
-    if (
-      !Number.isSafeInteger(stat.size) ||
-      stat.size < 0 ||
-      stat.size > DEFAULT_CONNECTOR_ATTACHMENT_MAX_BYTES
-    ) {
-      throw new ElizaError(
-        `X attachment exceeds ${DEFAULT_CONNECTOR_ATTACHMENT_MAX_BYTES} bytes`,
-        {
-          code: "X_ATTACHMENT_TOO_LARGE",
-          context: {
-            path: resolvedPath,
-            bytes: stat.size,
-            maxBytes: DEFAULT_CONNECTOR_ATTACHMENT_MAX_BYTES,
-          },
-        },
-      );
-    }
-
-    const mediaBuffer = Buffer.allocUnsafe(stat.size);
-    let total = 0;
-    while (total < mediaBuffer.length) {
-      const { bytesRead } = await handle.read(
-        mediaBuffer,
-        total,
-        mediaBuffer.length - total,
-        total,
-      );
-      if (bytesRead === 0) break;
-      total += bytesRead;
-    }
-    return total === mediaBuffer.length
-      ? mediaBuffer
-      : mediaBuffer.subarray(0, total);
-  } finally {
-    await handle.close();
-  }
-}
-
 /**
- * Fetches media data from a list of attachments, supporting both HTTP URLs and local file paths.
- * Remote URLs go through {@link fetchRemoteMedia} (SSRF guard +
- * {@link DEFAULT_CONNECTOR_ATTACHMENT_MAX_BYTES}) so a lying or missing
- * Content-Length cannot force an unbounded `arrayBuffer()`.
+ * Resolves attachment bytes through the core outbound loader, the same one the
+ * Discord, Telegram and Slack connectors use: `data:` URLs, media-store
+ * handles (`/api/media/...`) and SSRF-guarded http(s) URLs. The MIME type comes
+ * from the loaded bytes, because `Media.contentType` is only a coarse kind
+ * such as "image".
  */
 export async function fetchMediaData(
   attachments: Media[],
+  localFetch?: ResolveOutboundAttachmentOptions["localFetch"],
 ): Promise<MediaData[]> {
   return Promise.all(
     attachments.map(async (attachment: Media) => {
-      if (/^(http|https):\/\//.test(attachment.url)) {
-        const { buffer, contentType } = await fetchRemoteMedia({
-          url: attachment.url,
-          maxBytes: DEFAULT_CONNECTOR_ATTACHMENT_MAX_BYTES,
-          timeoutMs: 30_000,
-        });
-        return {
-          data: buffer,
-          mediaType: attachment.contentType || contentType || "image/png",
-        };
-      }
-      const resolvedPath = path.resolve(attachment.url);
-      const mediaBuffer = await readLocalAttachment(resolvedPath);
-      return {
-        data: mediaBuffer,
-        mediaType: attachment.contentType || "image/png",
-      };
+      const { buffer, contentType } = await resolveOutboundAttachmentBytes(
+        attachment.url,
+        { localFetch },
+      );
+      return { data: buffer, mediaType: contentType };
     }),
   );
 }
@@ -358,8 +299,20 @@ export async function sendChunkedTweet(
   return client.withAuthenticatedSession(async (session) => {
     const mediaData =
       content.attachments && content.attachments.length > 0
-        ? await fetchMediaData(content.attachments)
+        ? await fetchMediaData(
+            content.attachments,
+            client.runtime.fetch ?? undefined,
+          )
         : [];
+    // X attaches media to a post only by uploaded media id.
+    const mediaIds: string[] = [];
+    for (const media of mediaData) {
+      mediaIds.push(
+        await client.twitterClient.uploadMedia(media.data, {
+          mimeType: media.mediaType,
+        }),
+      );
+    }
 
     const receipts = await sendTextAsTweetThread(
       content.text ?? "",
@@ -376,6 +329,7 @@ export async function sendChunkedTweet(
             chunk,
             index === 0 ? mediaData : [],
             previousTweetId ?? inReplyTo,
+            index === 0 ? mediaIds : undefined,
           );
         } catch (error) {
           logger.error(`Error sending chunk ${index + 1}:`, errorDetail(error));
@@ -439,28 +393,51 @@ export function splitTweetContent(
   }
   appendTextUnits(content.slice(cursor));
 
+  const isWhitespace = (unit: string | undefined) =>
+    unit !== undefined && /^\s+$/u.test(unit);
+
   const chunks: string[] = [];
-  let chunk = "";
-  for (const unit of units) {
-    const unitWeight = countTwitterWeightedLength(unit);
-    if (unitWeight > maxLength) {
-      throw new ElizaError(
-        "An indivisible X post token exceeds the provider limit",
-        {
-          code: "X_POST_TOKEN_TOO_LONG",
-          context: { maxLength },
-        },
-      );
-    }
-    const candidate = `${chunk}${unit}`;
-    if (chunk && countTwitterWeightedLength(candidate) > maxLength) {
-      chunks.push(chunk);
-      chunk = unit;
-    } else {
+  let start = 0;
+  while (start < units.length) {
+    let end = start;
+    let chunk = "";
+    for (; end < units.length; end += 1) {
+      const unit = units[end] as string;
+      if (countTwitterWeightedLength(unit) > maxLength) {
+        throw new ElizaError(
+          "An indivisible X post token exceeds the provider limit",
+          {
+            code: "X_POST_TOKEN_TOO_LONG",
+            context: { maxLength },
+          },
+        );
+      }
+      const candidate = `${chunk}${unit}`;
+      if (chunk && countTwitterWeightedLength(candidate) > maxLength) break;
       chunk = candidate;
     }
+
+    // Like splitSlackText: end the post after the last whitespace when that
+    // keeps it over half full, so words are not cut. The whitespace stays on
+    // this post, so joining the posts still gives back the original text.
+    if (end < units.length && !isWhitespace(units[end])) {
+      let cut = end - 1;
+      while (cut > start && !isWhitespace(units[cut])) cut -= 1;
+      if (cut > start) {
+        const kept = units.slice(start, cut + 1).join("");
+        if (
+          /\S/u.test(kept) &&
+          countTwitterWeightedLength(kept) > maxLength / 2
+        ) {
+          chunk = kept;
+          end = cut + 1;
+        }
+      }
+    }
+
+    chunks.push(chunk);
+    start = end;
   }
-  if (chunk) chunks.push(chunk);
   return chunks;
 }
 

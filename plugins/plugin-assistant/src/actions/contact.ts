@@ -1548,6 +1548,9 @@ export function createContactActions(dependencies: ContactActionDependencies): {
     // Path B: DELETE_CONTACT semantics — id-based with runtime.deleteEntities.
     try {
       await rt.deleteEntities?.([entityId as UUID]);
+      // The contact service serves name lookups from its cache; drop the
+      // deleted entity there too, or later name operations find it again.
+      await relationships?.removeContact?.(entityId as UUID);
       return {
         text: `Deleted ${deleteTarget}.`,
         success: true,

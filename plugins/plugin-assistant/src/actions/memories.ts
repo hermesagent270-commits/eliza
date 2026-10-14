@@ -1706,13 +1706,14 @@ function mutationQueryFromMessage(
     .replace(LEADING_ADDRESSING_PREFIX, "")
     .replace(MENTION_MARKER_PATTERN, " ");
   if (addressed) {
-    // The agent's own name next to a mention marker is addressing too.
+    // The agent's own name next to a mention marker is addressing too. JS
+    // `\b` is ASCII-only, so names like "Zoë" or "미나" need Unicode edges.
     for (const word of (runtime.character?.name ?? "").split(/\s+/)) {
       if (word.length >= 2)
         text = text.replace(
           new RegExp(
-            `\\b${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
-            "gi",
+            `(?<![\\p{L}\\p{N}_])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_])`,
+            "giu",
           ),
           " ",
         );

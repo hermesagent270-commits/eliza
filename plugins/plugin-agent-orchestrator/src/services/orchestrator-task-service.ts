@@ -3903,9 +3903,11 @@ export class OrchestratorTaskService extends Service {
       !TERMINAL_TASK_STATUSES.has(doc.task.status);
     const nextMetadata = { ...doc.task.metadata };
     delete nextMetadata.pausedWithActiveWork;
+    // Keep `pausedWithActiveWork` until the fresh sub-agent is spawned: if the
+    // spawn fails, a retried resume must still re-engage instead of a no-op.
     const updated = await this.store.updateTask(taskId, {
       paused: false,
-      metadata: nextMetadata,
+      ...(shouldReEngage ? {} : { metadata: nextMetadata }),
     });
     if (!updated) return null;
     // If the task was parked when paused, re-seed the in-memory order from its
@@ -3939,6 +3941,11 @@ export class OrchestratorTaskService extends Service {
         completionRole: "coordinator",
         task: "Resume this task from its current durable context. Reinspect the task timeline and any partial work, then continue until the goal is met or you are blocked.",
       });
+      const spawned = await this.store.getTask(taskId);
+      if (spawned) {
+        const { pausedWithActiveWork: _, ...metadata } = spawned.task.metadata;
+        await this.store.updateTask(taskId, { metadata });
+      }
     }
     return this.getTask(taskId);
   }

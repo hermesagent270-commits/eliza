@@ -68,15 +68,14 @@ const CHAIN_MAP: Record<string, Chain> = {
   matic: polygon,
 };
 
-/** Fallback RPC endpoints for chains that have no public default in viem. */
-const DEFAULT_RPC: Record<string, string> = {
-  base: "https://mainnet.base.org",
-  "base-sepolia": "https://sepolia.base.org",
-  mainnet: "https://cloudflare-eth.com",
-  ethereum: "https://cloudflare-eth.com",
-  arbitrum: "https://arb1.arbitrum.io/rpc",
-  optimism: "https://mainnet.optimism.io",
-  polygon: "https://polygon-rpc.com",
+/** Fallback RPC endpoints keyed by chain ID. */
+const DEFAULT_RPC_BY_ID: Record<number, string> = {
+  8453: "https://mainnet.base.org",
+  84532: "https://sepolia.base.org",
+  1: "https://cloudflare-eth.com",
+  42161: "https://arb1.arbitrum.io/rpc",
+  10: "https://mainnet.optimism.io",
+  137: "https://polygon-rpc.com",
 };
 
 /**
@@ -201,8 +200,8 @@ export function walletFromEnv(options?: {
   const rpcUrl =
     options?.rpcUrl ??
     process.env.RPC_URL ??
-    DEFAULT_RPC[chain.name.toLowerCase()] ??
-    DEFAULT_RPC.base;
+    DEFAULT_RPC_BY_ID[chain.id] ??
+    DEFAULT_RPC_BY_ID[8453];
 
   // ── Build viem walletClient ──────────────────────────────────────────────
   const account = privateKeyToAccount(privateKey);

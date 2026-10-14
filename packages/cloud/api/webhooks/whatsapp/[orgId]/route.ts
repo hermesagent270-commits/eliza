@@ -183,12 +183,34 @@ async function handleWhatsAppVerification(c: AppContext): Promise<Response> {
 // Message Handling
 // ============================================================================
 
+const WHATSAPP_MEDIA_LABELS: Record<
+  NonNullable<WhatsAppIncomingMessage["mediaType"]>,
+  string
+> = {
+  image: "a photo",
+  video: "a video",
+  audio: "a voice note",
+  document: "a document",
+  sticker: "a sticker",
+};
+
+/** The note that tells the agent which media the user sent. */
+function whatsAppMediaNote(msg: WhatsAppIncomingMessage): string {
+  const kind = msg.mediaType ? WHATSAPP_MEDIA_LABELS[msg.mediaType] : "a file";
+  const name = msg.mediaFilename ? ` ("${msg.mediaFilename}")` : "";
+  return `[The user sent ${kind}${name} on WhatsApp. This connector cannot open WhatsApp media yet.]`;
+}
+
 async function handleIncomingMessage(
   orgId: string,
   msg: WhatsAppIncomingMessage,
   defer: (promise: Promise<unknown>) => void,
 ): Promise<void> {
-  const text = msg.text?.trim();
+  // A photo, video, voice note, document or sticker is a real message: keep
+  // its caption and tell the agent what was sent, instead of dropping the
+  // turn so the user gets no reply. This route does not download media.
+  const mediaNote = msg.mediaType ? whatsAppMediaNote(msg) : undefined;
+  const text = [msg.text?.trim(), mediaNote].filter(Boolean).join("\n");
   if (!text) {
     logger.info("[WhatsAppWebhook] Skipping non-text message", {
       orgId,

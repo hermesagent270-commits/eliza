@@ -17,6 +17,7 @@ import {
   type World,
 } from "@elizaos/core";
 import { describe, expect, it } from "vitest";
+import { createIsolatedTestDatabase } from "../../../../../plugin-sql/src/__tests__/test-helpers";
 import {
   resolveEffectiveMuteState,
   worldMuteActive,
@@ -58,6 +59,7 @@ function makeRuntime(seed?: {
       memories.push(memory);
       return memory.id;
     },
+    ensureParticipantInRoom: async () => {},
     getParticipantUserState: async (roomId: UUID, entityId: UUID) =>
       states.get(`${roomId}:${entityId}`) ?? null,
     updateParticipantUserState: async (
@@ -457,5 +459,60 @@ describe("ROOM action — declared parameters match the handler", () => {
     );
     expect(result?.success).toBe(true);
     expect(ctx.states.get(`${ROOM_ID}:${AGENT_ID}`)).toBe("FOLLOWED");
+  });
+});
+
+describe("ROOM action — room without an agent participant row (real PGlite)", () => {
+  it("mute adds the agent to the room so the mute holds", async () => {
+    const f = await createIsolatedTestDatabase("room-mute-no-participant");
+    const roomId = "00000000-0000-0000-0000-0000000000f1" as UUID;
+    try {
+      await f.runtime.createEntity({
+        id: f.testAgentId,
+        names: ["Agent"],
+        agentId: f.testAgentId,
+      });
+      await f.runtime.ensureWorldExists({
+        id: WORLD_ID,
+        name: "Cozy Devs",
+        agentId: f.testAgentId,
+      });
+      // A connector join creates the room without adding the agent to it.
+      await f.runtime.ensureRoomExists({
+        id: roomId,
+        name: "general",
+        source: "discord",
+        type: "GROUP",
+        channelId: "C1",
+        worldId: WORLD_ID,
+      } as Room);
+      await f.runtime.createEntity({
+        id: USER_ID,
+        names: ["Owner"],
+        agentId: f.testAgentId,
+      });
+      expect(await f.runtime.isRoomParticipant(roomId, f.testAgentId)).toBe(
+        false,
+      );
+
+      const result = await roomOpAction.handler(
+        f.runtime,
+        { ...msg("mute #general"), agentId: f.testAgentId, roomId },
+        state,
+        opts({ action: "mute", platform: "discord", roomId }),
+      );
+
+      expect(result?.success).toBe(true);
+      expect(
+        await f.runtime.getParticipantUserState(roomId, f.testAgentId),
+      ).toBe("MUTED");
+      // The next inbound message joins the agent to the room; the mute stays.
+      await f.runtime.ensureParticipantInRoom(f.testAgentId, roomId);
+      expect(
+        await f.runtime.getParticipantUserState(roomId, f.testAgentId),
+      ).toBe("MUTED");
+    } finally {
+      await f.cleanup();
+    }
   });
 });

@@ -30,6 +30,7 @@ import path from "node:path";
 import {
 	ensureDefaultAssignment,
 	readAssignments,
+	withAssignmentsLock,
 	writeAssignments,
 } from "./assignments";
 import { elizaModelsDir } from "./paths";
@@ -77,9 +78,11 @@ async function ensureBundledAssignment(
 		return;
 	}
 
-	const current = await readAssignments();
-	if (current.TEXT_EMBEDDING) return;
-	await writeAssignments({ ...current, TEXT_EMBEDDING: modelId });
+	await withAssignmentsLock(async () => {
+		const current = await readAssignments();
+		if (current.TEXT_EMBEDDING) return;
+		await writeAssignments({ ...current, TEXT_EMBEDDING: modelId });
+	});
 }
 
 /**

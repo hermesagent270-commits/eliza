@@ -150,6 +150,24 @@ export interface MessageProcessorHost {
   registerPendingReplyPersist(runtime: IAgentRuntime, roomId: UUID): () => void;
 }
 
+/**
+ * A Stop that lands after the model answered but before the reply is stored
+ * or sent must still win: the egress hooks and grounding checks await, and
+ * nothing after them re-reads the turn signal. Throwing the turn's own abort
+ * reason keeps the run terminal `cancelled` and lets the chat route write its
+ * interrupted receipt instead of a completed reply the user stopped.
+ */
+function throwIfTurnAborted(): void {
+  const signal = getStreamingContext()?.abortSignal;
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  throw reason instanceof TurnAbortedError
+    ? reason
+    : new TurnAbortedError(
+        reason instanceof Error ? reason.message : String(reason),
+      );
+}
+
 export class MessageProcessor {
   constructor(private readonly host: MessageProcessorHost) {}
 
@@ -751,6 +769,7 @@ export class MessageProcessor {
         message,
         earlyContent,
       );
+      throwIfTurnAborted();
       const earlyMemory: Memory = {
         id: earlyResponseId,
         entityId: runtime.agentId,
@@ -1329,6 +1348,7 @@ export class MessageProcessor {
               deliverableResponseContent,
             );
           responseContent = deliverableResponseContent;
+          throwIfTurnAborted();
           // Registered BEFORE the callback fires so a follow-up prompted
           // by this delivery always finds the barrier pending; released
           // (never rejected) in the finally once the persist settles.

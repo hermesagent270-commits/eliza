@@ -1146,6 +1146,28 @@ export class DiscordService extends Service implements IDiscordService {
 		);
 	}
 
+	/**
+	 * A send that names only a room (triggers, task progress, planner follow-ups)
+	 * answers on the bot that received that room's messages. Inbound Discord
+	 * connections record the account on the room's world.
+	 */
+	private async resolveAccountIdForTarget(
+		runtime: IAgentRuntime,
+		target: TargetInfo,
+	): Promise<string> {
+		const explicit = accountIdFromRecord(target);
+		if (explicit || !target.roomId) {
+			return this.resolveAccountIdFromTarget(target);
+		}
+		const room = await runtime.getRoom(target.roomId);
+		const world = room?.worldId ? await runtime.getWorld(room.worldId) : null;
+		return normalizeAccountId(
+			accountIdFromRecord(room?.metadata) ??
+				accountIdFromRecord(world?.metadata) ??
+				this.defaultAccountId,
+		);
+	}
+
 	public getDefaultAccountId(): string {
 		return this.defaultAccountId;
 	}
@@ -2005,11 +2027,12 @@ export class DiscordService extends Service implements IDiscordService {
 		let providerSendFailure: unknown;
 		let providerAcceptedAt: number | undefined;
 		// Resolve the connector account this outbound message must use.
-		// Priority: explicit target.accountId > this service instance's default.
-		// `Content.metadata` is intentionally NOT consulted because it may be
-		// user-supplied per the MessageMetadata contract — actions thread the
-		// trusted inbound `Memory.metadata.accountId` into `target.accountId`.
-		const accountId = this.resolveAccountIdFromTarget(target);
+		// Priority: explicit target.accountId > the target room's account >
+		// this service instance's default. `Content.metadata` is intentionally
+		// NOT consulted because it may be user-supplied per the MessageMetadata
+		// contract — actions thread the trusted inbound
+		// `Memory.metadata.accountId` into `target.accountId`.
+		const accountId = await this.resolveAccountIdForTarget(runtime, target);
 		const state = this.getAccountState(accountId);
 		const client = state?.client ?? null;
 		if (!client?.isReady()) {
@@ -2267,6 +2290,8 @@ export class DiscordService extends Service implements IDiscordService {
 												? {
 														reply: {
 															messageReference: outboundReplyToMessageId,
+															// A deleted target still gets the answer, without the reply link.
+															failIfNotExists: false,
 														},
 													}
 												: {}),
@@ -2285,6 +2310,7 @@ export class DiscordService extends Service implements IDiscordService {
 											? {
 													reply: {
 														messageReference: outboundReplyToMessageId,
+														failIfNotExists: false,
 													},
 												}
 											: {}),
@@ -2303,6 +2329,7 @@ export class DiscordService extends Service implements IDiscordService {
 											? {
 													reply: {
 														messageReference: outboundReplyToMessageId,
+														failIfNotExists: false,
 													},
 												}
 											: {}),
@@ -2318,6 +2345,7 @@ export class DiscordService extends Service implements IDiscordService {
 										? {
 												reply: {
 													messageReference: outboundReplyToMessageId,
+													failIfNotExists: false,
 												},
 											}
 										: {}),
@@ -3766,6 +3794,30 @@ export class DiscordService extends Service implements IDiscordService {
 			params.target,
 			params,
 		);
+		// A bot cannot leave one channel of a server; it stops listening only
+		// when a channel allowlist excludes the channel. Say so instead of
+		// reporting a leave that changes nothing.
+		const configured =
+			this.getAccountState(accountId)?.allowedChannelIds ??
+			this.allowedChannelIds;
+		if (!configured) {
+			throw new ElizaError(
+				"Discord listens in every channel because no CHANNEL_IDS allowlist is set, so leaving one channel has no effect.",
+				{
+					code: "DISCORD_LEAVE_NO_CHANNEL_ALLOWLIST",
+					context: { accountId, channelId: channel.id },
+				},
+			);
+		}
+		if (configured.includes(channel.id)) {
+			throw new ElizaError(
+				"This Discord channel is listed in CHANNEL_IDS. Remove it from the configuration to leave it.",
+				{
+					code: "DISCORD_LEAVE_CONFIGURED_CHANNEL",
+					context: { accountId, channelId: channel.id },
+				},
+			);
+		}
 		this.removeAllowedChannel(channel.id, accountId);
 	}
 

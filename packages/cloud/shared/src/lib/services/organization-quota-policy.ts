@@ -2,7 +2,8 @@
 import { ElizaError } from "@elizaos/core";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { type DbTransaction, dbWrite } from "../../db/client";
-import { readPrimaryOrganizationSubscription } from "../../db/repositories/account-billing-snapshot-subscription";
+import { readPrimaryOrganizationSubscriptionSource } from "../../db/repositories/account-billing-snapshot-subscription";
+import { readConfiguredCancellationAuthority } from "../../db/repositories/configured-schedule-cancellation-authority";
 import {
   deriveSubscriptionEntitlementValues,
   SUBSCRIPTION_FREE_ENTITLEMENT_VALUES,
@@ -12,7 +13,6 @@ import {
   readActiveSubscriptionGrant,
 } from "../../db/repositories/subscription-grants";
 import {
-  billingSubscriptionRevisions,
   billingSubscriptions,
   organizationSubscriptionAuthorities,
 } from "../../db/schemas/billing-subscriptions";
@@ -509,22 +509,14 @@ export async function readOrganizationQuotaPolicyInTransaction(
       },
     };
   }
-  const current = await readPrimaryOrganizationSubscription(tx, organizationId);
+  const current = await readPrimaryOrganizationSubscriptionSource(tx, organizationId);
   if (current.state !== "current")
     return unavailable(organizationId, "subscription_source_mismatch");
+  // A published pending plan must retain its original configured schedule proof.
+  const hasPendingSchedule = current.subscription.pending_plan_key !== null;
+  if (hasPendingSchedule) await readConfiguredCancellationAuthority(tx, current.subscription);
   const entitlement = current.entitlement;
-  const [revision] = await tx
-    .select()
-    .from(billingSubscriptionRevisions)
-    .where(
-      and(
-        eq(billingSubscriptionRevisions.subscription_id, current.subscription.id),
-        eq(billingSubscriptionRevisions.organization_id, organizationId),
-        eq(billingSubscriptionRevisions.revision, current.subscription.lifecycle_revision),
-      ),
-    );
-  if (!revision) return unavailable(organizationId, "subscription_revision_unavailable");
-  const expected = deriveSubscriptionEntitlementValues(revision);
+  const expected = deriveSubscriptionEntitlementValues(current.revision);
   for (const key of Object.keys(expected) as Array<keyof typeof expected>) {
     const actualValue = entitlement[key];
     const expectedValue = expected[key];
@@ -535,12 +527,16 @@ export async function readOrganizationQuotaPolicyInTransaction(
     )
       return unavailable(organizationId, "subscription_projection_conflict");
   }
-  const [clock] = await tx
-    .select({ now: sql<Date>`clock_timestamp()` })
-    .from(organizations)
-    .where(eq(organizations.id, organizationId));
-  if (!clock) return unavailable(organizationId, "missing_database_clock");
-  const now = observedAt ?? new Date(clock.now);
+  let now = observedAt ?? current.observedAt;
+  if (hasPendingSchedule && observedAt === undefined) {
+    // Observe expiry after the additional proof reads, as the full reader did.
+    const [clock] = await tx
+      .select({ now: sql<Date>`clock_timestamp()` })
+      .from(organizations)
+      .where(eq(organizations.id, organizationId));
+    if (!clock) return unavailable(organizationId, "missing_database_clock");
+    now = new Date(clock.now);
+  }
   if (now < entitlement.effective_from)
     return unavailable(organizationId, "entitlement_not_effective");
   // Stripe settles renewals shortly after the stored period end, so an active
@@ -566,10 +562,14 @@ export async function readOrganizationQuotaPolicyInTransaction(
   // subscription keeps precedence.
   const servedFree = lapsed || entitlement.plan_key === "free";
   const promo = servedFree ? await readActiveSubscriptionGrant(tx, organizationId, now) : undefined;
-  const [stored] = await tx
-    .select({ generation: organizationSubscriptionAuthorities.policy_generation })
-    .from(organizationSubscriptionAuthorities)
-    .where(eq(organizationSubscriptionAuthorities.organization_id, organizationId));
+  // The source statement observes its policy generation and database clock
+  // together. A free projection reobserves generation after grant discovery.
+  const [stored] = servedFree
+    ? await tx
+        .select({ generation: organizationSubscriptionAuthorities.policy_generation })
+        .from(organizationSubscriptionAuthorities)
+        .where(eq(organizationSubscriptionAuthorities.organization_id, organizationId))
+    : [{ generation: current.generation }];
   if (!stored) return unavailable(organizationId, "missing_policy_generation");
   if (promo)
     return entitlementShapedPolicy(organizationId, {

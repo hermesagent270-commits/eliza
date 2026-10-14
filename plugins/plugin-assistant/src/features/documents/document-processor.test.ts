@@ -174,6 +174,36 @@ describe("processFragmentsSynchronously", () => {
     ]);
   });
 
+  it("fails a document when only some fragments were saved", async () => {
+    let writes = 0;
+    const runtime = runtimeWith({
+      createMemory: async (memory: Memory) => {
+        writes += 1;
+        if (writes === 2) throw new Error("database unavailable");
+        return memory.id as UUID;
+      },
+      reportError: () => {},
+    });
+
+    // Long enough for several fragments; one of them fails to save.
+    const text = Array.from(
+      { length: 4000 },
+      (_, index) => `word${index}`,
+    ).join(" ");
+    await expect(
+      processFragmentsSynchronously({
+        runtime,
+        documentId: DOCUMENT_ID,
+        fullDocumentText: text,
+        agentId: MOCK_AGENT_ID,
+      }),
+    ).rejects.toMatchObject({
+      code: "DOCUMENT_EMBED_FAILED",
+      context: { documentId: DOCUMENT_ID, failedCount: 1 },
+    });
+    expect(writes).toBeGreaterThan(2);
+  });
+
   it("generates and stores a real vector result when an embedding model exists", async () => {
     const writes: Memory[] = [];
     const runtime = runtimeWith({

@@ -384,10 +384,24 @@ export async function searchKeylessWeb(
  * canonical host protection; callers must validate destinations before using this helper.
  * This module is not a public package subpath. Complete MCP payloads are preserved.
  */
+export interface KeylessWebFetchOptions extends KeylessWebSearchOptions {
+    objective?: string;
+    fullContent?: boolean;
+}
+
 export async function fetchKeylessWeb(
     urls: readonly string[],
-    options: KeylessWebSearchOptions = {}
+    options: KeylessWebFetchOptions = {}
 ): Promise<KeylessWebSearchResult | undefined> {
+    if (
+        options.objective !== undefined &&
+        (typeof options.objective !== "string" ||
+            !options.objective.trim() ||
+            options.objective.length > 1000)
+    )
+        throw new Error("Bounded web fetch objective required");
+    if (options.fullContent !== undefined && typeof options.fullContent !== "boolean")
+        throw new Error("Boolean full content policy required");
     if (urls.length < 1 || urls.length > 2 || new Set(urls).size !== urls.length) {
         throw new Error("One or two distinct public article URLs are required");
     }
@@ -404,8 +418,9 @@ export async function fetchKeylessWeb(
         {
             urls: [...urls],
             objective:
+                options.objective ??
                 "Return each article's own title, original publication date and opening article header. Preserve conflicting dates. Do not substitute modified, retrieval or related-article dates.",
-            full_content: false,
+            full_content: options.fullContent ?? false,
             ...(options.sessionId && /^[A-Za-z0-9_-]{1,100}$/.test(options.sessionId)
                 ? { session_id: options.sessionId }
                 : {}),

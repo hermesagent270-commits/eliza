@@ -24,6 +24,7 @@ import type {
   Memory,
 } from "@elizaos/core";
 import { requireConfirmation } from "@elizaos/core";
+import { getChainConfig } from "../lp/types.js";
 import type { WalletRouterParams } from "../types/wallet-router.js";
 import { ON_CHAIN_WRITE_SUBACTIONS } from "./wallet-context-safety.js";
 
@@ -45,6 +46,8 @@ export type WalletFinancialWriteParams = Omit<
   "subaction"
 > & {
   readonly subaction: string;
+  /** EVM network the LP write signs on; bound and shown like every other economic parameter. */
+  readonly chainId?: number;
   readonly pool?: string;
   readonly position?: string;
   readonly dex?: string;
@@ -92,6 +95,7 @@ export function walletFinancialPendingKey(
     WalletFinancialWriteParams,
     | "subaction"
     | "chain"
+    | "chainId"
     | "toChain"
     | "amount"
     | "recipient"
@@ -154,6 +158,9 @@ export function walletFinancialPendingKey(
   // mints and position ids are base58. dex/range/tokens/feeTier bind the LP
   // economic parameters so a confirmation cannot be replayed onto a
   // different protocol or range for the same pool id.
+  if (params.chainId !== undefined) {
+    entries.push(["chainId", String(params.chainId)]);
+  }
   if (params.pool !== undefined) {
     entries.push(["pool", params.pool]);
   }
@@ -196,6 +203,7 @@ export function walletFinancialPreview(
     WalletFinancialWriteParams,
     | "subaction"
     | "chain"
+    | "chainId"
     | "toChain"
     | "amount"
     | "recipient"
@@ -219,7 +227,13 @@ export function walletFinancialPreview(
     | "range"
   >,
 ): string {
-  const chainLabel = params.chain ?? params.toChain ?? "the selected chain";
+  // An LP write names the EVM network it signs on: "evm" alone does not
+  // tell the user whether the position opens on Base or Ethereum.
+  const network =
+    params.chainId === undefined
+      ? ""
+      : ` (${getChainConfig(params.chainId)?.name ?? "chain"} ${params.chainId})`;
+  const chainLabel = `${params.chain ?? params.toChain ?? "the selected chain"}${network}`;
   const dexClause = params.dex ? ` via ${params.dex}` : "";
   const pairClause =
     params.tokenA || params.tokenB

@@ -930,6 +930,7 @@ export class AccountDeletionRequestsRepository {
   async findRunnableIrreversibleRequests(
     now: Date,
     limit: number,
+    excludeIds: readonly string[] = [],
   ): Promise<AccountDeletionRequest[]> {
     return await dbWrite
       .select()
@@ -942,6 +943,7 @@ export class AccountDeletionRequestsRepository {
             isNull(accountDeletionRequests.next_reconcile_at),
             lte(accountDeletionRequests.next_reconcile_at, now),
           ),
+          excludeIds.length ? notInArray(accountDeletionRequests.id, [...excludeIds]) : undefined,
         ),
       )
       .orderBy(asc(accountDeletionRequests.execute_after))

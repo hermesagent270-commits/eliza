@@ -90,6 +90,7 @@ export const KNOWN_ROUTE_SHARD_KEYS: readonly string[] = [
   "v1/hf-proxy",
   "v1/hosted-frontend",
   "v1/jobs",
+  "v1/maps",
   "v1/market",
   "v1/marketing",
   "v1/mcps",

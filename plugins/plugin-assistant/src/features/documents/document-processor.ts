@@ -163,6 +163,34 @@ async function persistKeywordOnlyFragments(args: {
   return savedCount;
 }
 
+/**
+ * The saved fragment count, or a failure when only some fragments were saved.
+ * A document with fragments missing is incomplete: marking it ready would hide
+ * the missing text from search, and a re-upload of the same content skips a
+ * ready document. Failing it lets the caller roll the attempt back. A run that
+ * saved nothing returns 0, which the caller already fails.
+ */
+function completeFragmentCount(
+  documentId: UUID,
+  savedCount: number,
+  chunkCount: number,
+): number {
+  if (savedCount > 0 && savedCount < chunkCount) {
+    throw new ElizaError(
+      `${chunkCount - savedCount} of ${chunkCount} document fragments failed processing`,
+      {
+        code: "DOCUMENT_EMBED_FAILED",
+        context: {
+          documentId,
+          failedCount: chunkCount - savedCount,
+          chunkCount,
+        },
+      },
+    );
+  }
+  return savedCount;
+}
+
 export async function processFragmentsSynchronously({
   runtime,
   documentId,
@@ -204,7 +232,7 @@ export async function processFragmentsSynchronously({
     logger.debug(
       `No document embedding model registered; persisting ${chunks.length} keyword-searchable fragment(s)`,
     );
-    return persistKeywordOnlyFragments({
+    const savedCount = await persistKeywordOnlyFragments({
       runtime,
       documentId,
       chunks,
@@ -215,6 +243,7 @@ export async function processFragmentsSynchronously({
       documentTitle,
       documentMetadata,
     });
+    return completeFragmentCount(documentId, savedCount, chunks.length);
   }
 
   const providerLimits = await getProviderRateLimits(runtime);
@@ -248,8 +277,7 @@ export async function processFragmentsSynchronously({
   if (failedCount > 0) {
     logger.warn(`${failedCount}/${chunks.length} chunks failed processing`);
   }
-
-  return savedCount;
+  return completeFragmentCount(documentId, savedCount, chunks.length);
 }
 
 export async function extractTextFromDocument(

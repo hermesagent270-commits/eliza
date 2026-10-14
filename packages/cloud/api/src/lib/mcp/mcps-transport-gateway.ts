@@ -505,7 +505,14 @@ async function handleBuiltinJsonRpc(
     if (!name) {
       return jsonRpcError(id, -32602, "Missing tool name");
     }
-    const result = await callBuiltinTool(provider, name, args);
+    let result: ToolResult;
+    try {
+      result = await callBuiltinTool(provider, name, args);
+    } catch (error) {
+      result = errorResult({
+        error: error instanceof Error ? error.message : "Tool call failed",
+      });
+    }
     return jsonRpcResult(id, result);
   }
 

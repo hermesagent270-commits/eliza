@@ -129,6 +129,7 @@ import {
   type ExtractedUpdateFields,
   extractUpdateFieldsWithLlm,
 } from "./lib/extract-update-fields.js";
+import { containsInvariantPhrase } from "./lib/invariant-phrase.js";
 import {
   clearDeferredLifeDraftCache,
   clearRecentLifeSaveCache,
@@ -924,35 +925,50 @@ function buildSavedGoalReply(goal: {
   return parts.join(" ");
 }
 
-function matchByTitle<
-  T extends { definition?: { title: string }; goal?: { title: string } },
->(entries: T[], targetTitle: string): T | null {
-  const normalized = normalizeTitle(targetTitle);
-  return (
-    entries.find(
-      (e) =>
-        normalizeTitle(e.definition?.title ?? e.goal?.title ?? "") ===
-        normalized,
-    ) ??
-    entries.find((e) =>
-      normalizeTitle(e.definition?.title ?? e.goal?.title ?? "").includes(
-        normalized,
-      ),
-    ) ??
-    null
-  );
+/** Exact title, then whole word/phrase, then substring: the first tier with
+ * any hit wins, so "read" never lands on "ready" while CJK titles that abut a
+ * particle still resolve through the substring tier. */
+function matchByTitle<T>(
+  entries: T[],
+  target: string,
+  titleOf: (entry: T) => string,
+): T[] {
+  const normalized = normalizeTitle(target);
+  if (!normalized) return [];
+  const titled = entries.map((entry) => ({
+    entry,
+    title: normalizeTitle(titleOf(entry)),
+  }));
+  for (const inTier of [
+    (title: string) => title === normalized,
+    (title: string) => containsInvariantPhrase(title, normalized),
+    (title: string) => title.includes(normalized),
+  ]) {
+    const hits = titled.filter(({ title }) => inTier(title));
+    if (hits.length > 0) return hits.map(({ entry }) => entry);
+  }
+  return [];
 }
 
 async function resolveGoal(
   service: LifeOpsService,
   target: string | undefined,
   domain?: LifeOpsDomain,
-): Promise<LifeOpsGoalRecord | null> {
-  if (!target) return null;
+): Promise<{ match: LifeOpsGoalRecord | null; ambiguousCandidates: string[] }> {
+  if (!target) return { match: null, ambiguousCandidates: [] };
   const goals = (await service.listGoals()).filter((e) =>
     domain ? e.goal.domain === domain : true,
   );
-  return goals.find((e) => e.goal.id === target) ?? matchByTitle(goals, target);
+  const byId = goals.find((e) => e.goal.id === target);
+  if (byId) return { match: byId, ambiguousCandidates: [] };
+  const matches = matchByTitle(goals, target, (e) => e.goal.title);
+  return matches.length === 1
+    ? { match: matches[0], ambiguousCandidates: [] }
+    : { match: null, ambiguousCandidates: matches.map((e) => e.goal.title) };
+}
+
+function goalAmbiguityReply(candidates: string[]): string {
+  return `Multiple items match — which one?\n${candidates.map((title) => `  - ${title}`).join("\n")}`;
 }
 
 type DefinitionResult = {
@@ -1008,8 +1024,10 @@ function resolveDefinitionInRecords(
       ambiguousCandidates: exactMatches.map(definitionDisambiguationLabel),
     };
   }
-  const substringMatches = defs.filter((entry) =>
-    normalizeTitle(entry.definition.title).includes(normalized),
+  const substringMatches = matchByTitle(
+    defs,
+    target,
+    (entry) => entry.definition.title,
   );
   if (substringMatches.length === 1) {
     return {
@@ -1308,15 +1326,24 @@ export async function resolveDefinitionFromIntent(
     return direct.match;
   }
   const defs = await listCallerDefinitions(service, domain);
+  const normalizedIntent = normalizeTitle(intent);
+  const titled = defs
+    .map((entry) => ({ entry, title: normalizeTitle(entry.definition.title) }))
+    .filter(({ title }) => title.length > 0);
+  for (const inTier of [
+    (title: string) => title === normalizedIntent,
+    (title: string) => containsInvariantPhrase(normalizedIntent, title),
+    (title: string) => normalizedIntent.includes(title),
+  ]) {
+    const named = titled.filter(({ title }) => inTier(title));
+    if (named.length === 1) return named[0].entry;
+    if (named.length > 1) return null;
+  }
   const intentTokens = new Set(tokenizeTitle(intent));
   let best: LifeOpsDefinitionRecord | null = null;
   let bestScore = 0;
   let tied = false;
   for (const entry of defs) {
-    const title = normalizeTitle(entry.definition.title);
-    if (title.length > 0 && normalizeTitle(intent).includes(title)) {
-      return entry;
-    }
     const overlap = tokenizeTitle(entry.definition.title).filter((token) =>
       intentTokens.has(token),
     ).length;
@@ -1475,9 +1502,7 @@ async function resolveOccurrence(
   }
 
   // Substring matches — disambiguate when multiple
-  const substringMatches = all.filter((o) =>
-    normalizeTitle(o.title).includes(normalized),
-  );
+  const substringMatches = matchByTitle(all, target, (o) => o.title);
   if (substringMatches.length === 1) {
     return { match: substringMatches.at(0) ?? null, ambiguousCandidates: [] };
   }
@@ -5495,7 +5520,8 @@ async function runLifeOperationHandlerInner(
         };
       }
       const resolvedGoal = definitionDraft.request.goalRef
-        ? await resolveGoal(service, definitionDraft.request.goalRef, domain)
+        ? (await resolveGoal(service, definitionDraft.request.goalRef, domain))
+            .match
         : null;
 
       // Preserve legacy content-based confirmation replay when the caller has no
@@ -6263,11 +6289,18 @@ async function runLifeOperationHandlerInner(
     }
 
     if (internalOp === "update_goal") {
-      const target = await resolveGoal(service, targetName, domain);
+      const { match: target, ambiguousCandidates } = await resolveGoal(
+        service,
+        targetName,
+        domain,
+      );
       if (!target)
         return {
           success: false,
-          text: "I could not find that goal to update.",
+          text:
+            ambiguousCandidates.length > 0
+              ? goalAmbiguityReply(ambiguousCandidates)
+              : "I could not find that goal to update.",
         };
       const request: UpdateLifeOpsGoalRequest = {
         ownership,
@@ -6536,11 +6569,18 @@ async function runLifeOperationHandlerInner(
           },
         };
       }
-      const target = await resolveGoal(service, targetName, domain);
+      const { match: target, ambiguousCandidates } = await resolveGoal(
+        service,
+        targetName,
+        domain,
+      );
       if (!target)
         return {
           success: false,
-          text: "I could not find that goal to delete.",
+          text:
+            ambiguousCandidates.length > 0
+              ? goalAmbiguityReply(ambiguousCandidates)
+              : "I could not find that goal to delete.",
         };
       await service.deleteGoal(target.goal.id);
       const fallback = `Deleted goal "${target.goal.title}".`;
@@ -6972,7 +7012,16 @@ async function runLifeOperationHandlerInner(
     }
 
     if (internalOp === "review_goal") {
-      const target = await resolveGoal(service, targetName, domain);
+      const { match: target, ambiguousCandidates } = await resolveGoal(
+        service,
+        targetName,
+        domain,
+      );
+      if (ambiguousCandidates.length > 0)
+        return {
+          success: false,
+          text: goalAmbiguityReply(ambiguousCandidates),
+        };
       if (!target) {
         const weeklyReview = await service.reviewGoalsForWeek();
         if (weeklyReview.summary.totalGoals === 0) {

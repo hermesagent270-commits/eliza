@@ -37,6 +37,7 @@ import type {
   PrimaryAccountBillingReadModel,
   PrimaryComputeRateSegment,
 } from "../../db/repositories/account-billing-snapshot";
+import { QUOTA_COUNTED_STATUSES } from "../constants/agent-sandbox-quota";
 import { buildOrganizationSubscriptionSnapshot } from "./account-subscription-snapshot";
 
 export type {
@@ -1056,8 +1057,8 @@ export async function buildAccountBillingSnapshot(
     const nonEagerLimit = policyLimit("nonEagerSandboxes", sandboxSource);
     const eagerLimit = policyLimit("sandboxes", sandboxSource);
     const sandboxPolicy: LimitCountPolicy = {
-      included: ["pending", "provisioning", "running", "stopped", "sleeping"],
-      excluded: ["pool rows", "disconnected", "error", "deletion_pending", "deletion_failed"],
+      included: [...QUOTA_COUNTED_STATUSES],
+      excluded: ["pool rows", "error", "deletion_pending", "deletion_failed"],
     };
     const agentSandboxes = {
       nonEagerCreate: observedCountLimit({

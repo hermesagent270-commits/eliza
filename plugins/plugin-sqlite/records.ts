@@ -1886,6 +1886,11 @@ export abstract class SQLiteRecordAdapter extends DatabaseAdapter<IStorage> {
       }
       for (const removedId of removedIds)
         await this.vectorIndex.remove(removedId);
+      for (const segment of storedSegments) {
+        if (segment.id && segment.embedding && segment.embedding.length > 0) {
+          await this.vectorIndex.add(segment.id, segment.embedding);
+        }
+      }
       return {
         status: params.mode === "create" ? "created" : "updated",
         parent: toMemory(storedParent),

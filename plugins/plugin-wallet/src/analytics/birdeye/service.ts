@@ -300,7 +300,7 @@ export class BirdeyeService extends Service {
     const BATCH_SIZE = 20; // max birdeye allows
     const TOTAL = options?.total ?? 100;
     const OFFSETS = Array.from(
-      { length: TOTAL / BATCH_SIZE },
+      { length: Math.ceil(TOTAL / BATCH_SIZE) },
       (_, i) => i * BATCH_SIZE,
     );
 
@@ -362,7 +362,7 @@ export class BirdeyeService extends Service {
         byKey.set(key, t);
       }
     }
-    const merged = Array.from(byKey.values());
+    const merged = Array.from(byKey.values()).slice(0, TOTAL);
 
     // Save to cache (ignore cache errors; don’t block the return path)
     const output = { data: merged, setAt: Date.now() };

@@ -241,19 +241,7 @@ function parseDelivery(value: unknown): InternalWebhookDelivery | undefined {
   return undefined;
 }
 
-async function deliveryHash(
-  delivery: InternalWebhookDelivery,
-): Promise<string> {
-  const body = JSON.stringify([
-    delivery.platform,
-    delivery.project,
-    delivery.app ?? null,
-    "connectorAccountId" in delivery ? delivery.connectorAccountId : null,
-    "providerThreadId" in delivery ? (delivery.providerThreadId ?? null) : null,
-    "phoneNumber" in delivery ? delivery.phoneNumber : delivery.chatId,
-    delivery.text,
-    delivery.idempotencyKey,
-  ]);
+async function sha256Hex(body: string): Promise<string> {
   return [
     ...new Uint8Array(
       await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)),
@@ -261,6 +249,54 @@ async function deliveryHash(
   ]
     .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
+}
+
+async function deliveryHash(
+  delivery: InternalWebhookDelivery,
+): Promise<string> {
+  return sha256Hex(
+    JSON.stringify([
+      delivery.platform,
+      delivery.project,
+      delivery.app ?? null,
+      "connectorAccountId" in delivery ? delivery.connectorAccountId : null,
+      "providerThreadId" in delivery
+        ? (delivery.providerThreadId ?? null)
+        : null,
+      "phoneNumber" in delivery ? delivery.phoneNumber : delivery.chatId,
+      delivery.text,
+      delivery.idempotencyKey,
+    ]),
+  );
+}
+
+/**
+ * Receipts written before connector and thread binding (gateway until
+ * 2026-10-12) hashed six slots. They stay valid for DELIVERY_RECEIPT_TTL_SECONDS
+ * after the deploy, but cannot prove connector or thread binding. Keep their
+ * outcome unknown without resending. Remove after every such receipt expires.
+ */
+async function deliveryHashBeforeBinding(
+  delivery: InternalWebhookDelivery,
+): Promise<string> {
+  return sha256Hex(
+    JSON.stringify([
+      delivery.platform,
+      delivery.project,
+      delivery.app ?? null,
+      "phoneNumber" in delivery ? delivery.phoneNumber : delivery.chatId,
+      delivery.text,
+      delivery.idempotencyKey,
+    ]),
+  );
+}
+
+async function receiptMatches(
+  receipt: { hash?: string } | null | undefined,
+  delivery: InternalWebhookDelivery,
+): Promise<boolean> {
+  if (!receipt?.hash) return false;
+  return receipt.hash === (await deliveryHash(delivery));
 }
 
 const notClaimed = () =>
@@ -309,10 +345,10 @@ export async function readInternalDeliveryReceipt(
   const receipt = parseReceipt(value);
   if (
     receipt?.state === "abandoned" &&
-    receipt.hash === (await deliveryHash(delivery))
+    (await receiptMatches(receipt, delivery))
   )
     return notClaimed();
-  if (!receipt || receipt.hash !== (await deliveryHash(delivery)))
+  if (!receipt || !(await receiptMatches(receipt, delivery)))
     return Response.json(
       { success: false, acceptance: "unknown", retryable: false },
       { status: 202 },
@@ -499,7 +535,20 @@ export async function deliverInternalMessage(
     );
   }
   const existing = parseReceipt(existingValue);
-  if (existing?.hash && existing.hash !== hash)
+  const existingMatches = await receiptMatches(existing, delivery);
+  if (
+    existing?.hash &&
+    !existingMatches &&
+    existing.hash === (await deliveryHashBeforeBinding(delivery))
+  ) {
+    // A legacy receipt cannot prove the requested connector/thread binding.
+    // Keep the outcome unknown and never resend or claim confirmed delivery.
+    return Response.json(
+      { success: false, acceptance: "unknown", retryable: false },
+      { status: 202 },
+    );
+  }
+  if (existing?.hash && !existingMatches)
     return Response.json(
       {
         success: false,
@@ -512,7 +561,7 @@ export async function deliverInternalMessage(
   if (existing?.state === "complete") {
     if (
       delivery.idempotencyKey.startsWith("network:") &&
-      (existing.hash !== hash ||
+      (!existingMatches ||
         !existing.acceptedAt ||
         existing.providerMessageIds.length === 0)
     )

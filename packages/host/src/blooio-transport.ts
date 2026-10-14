@@ -19,11 +19,11 @@ async function readReceipt(
   )
     throw new Error("Invalid receipt");
   const reader = response.body.getReader();
-  let rejectAbort: (reason: unknown) => void;
+  let rejectAbort: ((reason: unknown) => void) | undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
     rejectAbort = reject;
   });
-  const onAbort = () => rejectAbort(signal.reason);
+  const onAbort = () => rejectAbort?.(signal.reason);
   signal.addEventListener("abort", onAbort, { once: true });
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let bytes = 0,

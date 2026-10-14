@@ -264,6 +264,16 @@ final class ReminderStore {
     builder.addAction(new Notification.Action.Builder(null,"Done",decisionIntent(context,id,occurrence,"done")).build());
     builder.addAction(new Notification.Action.Builder(null,"Snooze 10 minutes",decisionIntent(context,id,occurrence,"snooze")).build());
    }
+   if(configuration.questionActionLabel!=null){
+    try{
+     String questionToken=new ReminderTaps(context,this).prepareQuestion(selectedRow(context,id,value));
+     Intent questionOpen=new Intent(context,configuration.activityClass).setAction(configuration.openAction).setData(Uri.parse(configuration.tapUriPrefix+questionToken)).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP);
+     PendingIntent questionTap=PendingIntent.getActivity(context,0,questionOpen,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
+     Notification.Action.Builder question=new Notification.Action.Builder(null,configuration.questionActionLabel,questionTap);
+     if(android.os.Build.VERSION.SDK_INT>=31)question.setAuthenticationRequired(true);
+     builder.addAction(question.build());
+    }catch(Exception unavailable){throw new IllegalStateException("Reminder question route could not be saved",unavailable);}
+   }
    context.getSystemService(NotificationManager.class).notify(configuration.notificationTag(id), 0, builder.build());
  }
  private void initializeRecurrence(JSONObject record,JSONObject config,long at)throws JSONException {

@@ -96,6 +96,7 @@ export function deviceRequestCredential(
     "clock.handoff.v1",
     "clock.handoff.v2",
     "clock.alarms.v1",
+    "sms.send.v1",
   ]);
   if (
     capabilities.length > allowedCapabilities.size ||
@@ -176,6 +177,7 @@ export async function handleDeviceActionRoutes(
             "clock.handoff.v1",
             "clock.handoff.v2",
             "clock.alarms.v1",
+            "sms.send.v1",
           ],
         },
       });

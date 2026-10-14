@@ -364,7 +364,7 @@ try {
   await page.evaluate(() => {
     document.body.insertAdjacentHTML(
       "beforeend",
-      '<form id="contact" aria-label="Contact details"><fieldset><legend>Where we reach you</legend><span>Phone</span><input id="phone" name="phone"><input name="zip" placeholder="ZIP code"></fieldset><input name="ssn"><input id="routingNumber"><label>Social Security number <input id="ss2"></label><button>Save</button></form><table><tr><td>Water bill</td><td><button type="button" class="row-pay">Open</button></td></tr><tr><td>Gas bill</td><td><button type="button" class="row-pay">Open</button></td></tr></table><div id="icon" style="cursor:pointer;width:20px;height:20px" onclick="document.querySelector(\'#count\').textContent=\'icon\'"><svg width="10" height="10"><title>Help</title></svg></div><span id="tip" title="Search the site" tabindex="0" style="display:inline-block;width:10px;height:10px"></span>',
+      '<form id="contact" aria-label="Contact details"><fieldset><legend>Where we reach you</legend><span>Phone</span><input id="phone" name="phone"><input name="zip" placeholder="ZIP code"></fieldset><input name="ssn"><input id="routingNumber"><label>Social Security number <input id="ss2"></label><label>PIN code <input id="pincode" name="postal_code"></label><button>Save</button></form><table><tr><td>Water bill</td><td><button type="button" class="row-pay">Open</button></td></tr><tr><td>Gas bill</td><td><button type="button" class="row-pay">Open</button></td></tr></table><div id="icon" style="cursor:pointer;width:20px;height:20px" onclick="document.querySelector(\'#count\').textContent=\'icon\'"><svg width="10" height="10"><title>Help</title></svg></div><span id="tip" title="Search the site" tabindex="0" style="display:inline-block;width:10px;height:10px"></span>',
     );
   });
   state = await snapshot();
@@ -383,6 +383,8 @@ try {
   assert.equal(by("#routingNumber").sensitive, "bank-account");
   assert.equal(by("#ss2").sensitive, "government-id");
   assert.equal(by("#phone").sensitive, null);
+  // An Indian "PIN code" postal field is an address field, not a password.
+  assert.equal(by("#pincode").sensitive, null);
   const save = state.value.elements.find((element) => element.label === "Save");
   assert.equal(save.submits, true);
   assert.equal(by("#go").submits, false);

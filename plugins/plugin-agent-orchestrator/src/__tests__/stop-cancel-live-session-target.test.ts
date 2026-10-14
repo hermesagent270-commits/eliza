@@ -474,6 +474,60 @@ describe("TASKS control resume with an instruction and no running session", () =
   }, 20_000);
 });
 
+describe("resumeTask after a failed re-engage spawn", () => {
+  it("keeps the re-engage for the next resume", async () => {
+    let service: AcpService | undefined;
+    let tasks: OrchestratorTaskService | undefined;
+    const runtime = runtimeWith(
+      () => service,
+      () => tasks,
+    );
+    service = new AcpService(runtime);
+    await service.start();
+    const store = new OrchestratorTaskStore({ backend: "memory" });
+    tasks = new OrchestratorTaskService(runtime, { store });
+    const live = async (taskId: string) =>
+      (await store.getTask(taskId))?.sessions.filter(
+        (s) => s.status !== "stopped",
+      ) ?? [];
+    try {
+      const task = await store.createTask({
+        title: "Interrupted task",
+        goal: "finish the long build",
+        acceptanceCriteria: [],
+        roomId: "target-room",
+        worldId: "target-world",
+      });
+      const taskId = task.task.id;
+      await tasks.spawnAgentForTask(taskId);
+      await tasks.pauseTask(taskId);
+      expect(await live(taskId)).toEqual([]);
+
+      // The coding CLI cannot start a session (for example, it lost its login).
+      await writeFile(
+        cliPath,
+        '#!/usr/bin/env node\nprocess.stderr.write("not authenticated\\n");\nprocess.exit(1);\n',
+      );
+      await expect(tasks.resumeTask(taskId)).rejects.toThrow();
+      expect(await live(taskId)).toEqual([]);
+
+      // After the CLI works again, resume must start the interrupted work.
+      await writeFile(cliPath, FAKE_ACPX);
+      await tasks.resumeTask(taskId);
+      expect(await live(taskId)).toHaveLength(1);
+      expect(
+        (await store.getTask(taskId))?.task.metadata?.pausedWithActiveWork,
+      ).toBeUndefined();
+
+      // A completed re-engage is not repeated by another resume.
+      await tasks.resumeTask(taskId);
+      expect(await live(taskId)).toHaveLength(1);
+    } finally {
+      await service.stop();
+    }
+  }, 30_000);
+});
+
 describe("TASKS history with a task id", () => {
   async function withTwoTasks(
     body: (ctx: {

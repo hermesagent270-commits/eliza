@@ -99,6 +99,13 @@ import {
   validateReminderCreateResult,
 } from "./reminder-create-contract.ts";
 import {
+  isSmsSend,
+  SMS_SEND_CAPABILITY,
+  smsBindingText,
+  smsReceiptOutcome,
+  validateSmsResult,
+} from "./sms-contract.ts";
+import {
   type DeviceViewProfile,
   enabledDeviceViews,
   storedDeviceViewProfile,
@@ -802,6 +809,7 @@ export class DeviceActionService {
           CLOCK_REPEAT_CAPABILITY,
           CLOCK_ALARMS_CAPABILITY,
           MAPS_CAPABILITY,
+          SMS_SEND_CAPABILITY,
         ],
       };
     });
@@ -1016,6 +1024,7 @@ export class DeviceActionService {
       throw new DeviceActionError("Calendar capability unavailable");
     if (
       ![
+        "sms_send",
         "clock_handoff",
         "clock_alarm",
         "create_note",
@@ -1523,6 +1532,11 @@ export class DeviceActionService {
       const request = await this.proposal(q, row, c, id, expectedDigest);
       const payload = validateDevicePayload(request.payload);
       if (
+        isSmsSend(payload.operation) &&
+        !c.capabilities?.includes(SMS_SEND_CAPABILITY)
+      )
+        throw new DeviceActionError("SMS capability unavailable");
+      if (
         isCalendarOperation(payload.operation) &&
         !calendarCapabilityAvailable(payload.operation.type, c.capabilities)
       )
@@ -1561,7 +1575,36 @@ export class DeviceActionService {
       const read =
         payload.operation.type === "read_selected_notes" ||
         payload.operation.type === "read_calendar_range";
-      if (isClockOperation(payload.operation)) {
+      if (isSmsSend(payload.operation)) {
+        if (receipt.operationId !== request.execution?.providerIdempotencyKey)
+          throw new DeviceActionError(
+            "SMS journal identity differs from execution claim",
+          );
+        // Missing evidence can only preserve uncertainty, never prove a send or enable retry.
+        if (receipt.outcome !== "unknown" || value.result !== undefined) {
+          try {
+            const result = validateSmsResult(
+              payload.operation,
+              value.result,
+              identifier(receipt.operationId),
+              createHash("sha256")
+                .update(smsBindingText(payload.operation))
+                .digest("hex"),
+            );
+            const outcome = smsReceiptOutcome(result);
+            if (
+              receipt.outcome !== outcome &&
+              !(receipt.outcome === "not_applied" && outcome === "failed")
+            )
+              throw new DeviceActionError(
+                "SMS receipt outcome conflicts with native evidence",
+              );
+            receipt = { ...receipt, result };
+          } catch {
+            throw new DeviceActionError("Invalid SMS receipt");
+          }
+        }
+      } else if (isClockOperation(payload.operation)) {
         try {
           if (receipt.outcome !== "unknown" || value.result !== undefined)
             receipt = {
@@ -1727,6 +1770,11 @@ export class DeviceActionService {
       const request = await this.proposal(q, row, c, id, expectedDigest);
       const payload = validateDevicePayload(request.payload);
       if (
+        isSmsSend(payload.operation) &&
+        !c.capabilities?.includes(SMS_SEND_CAPABILITY)
+      )
+        throw new DeviceActionError("SMS capability unavailable");
+      if (
         isCalendarOperation(payload.operation) &&
         !calendarCapabilityAvailable(payload.operation.type, c.capabilities)
       )
@@ -1762,7 +1810,36 @@ export class DeviceActionService {
         !c.capabilities?.includes(NOTES_CAPABILITY)
       )
         throw new DeviceActionError("Notes capability unavailable");
-      if (isClockOperation(payload.operation)) {
+      if (isSmsSend(payload.operation)) {
+        if (receipt.operationId !== request.execution?.providerIdempotencyKey)
+          throw new DeviceActionError(
+            "SMS journal identity differs from execution claim",
+          );
+        // Missing evidence can only preserve uncertainty, never prove a send or enable retry.
+        if (receipt.outcome !== "unknown" || value.result !== undefined) {
+          try {
+            const result = validateSmsResult(
+              payload.operation,
+              value.result,
+              identifier(receipt.operationId),
+              createHash("sha256")
+                .update(smsBindingText(payload.operation))
+                .digest("hex"),
+            );
+            const outcome = smsReceiptOutcome(result);
+            if (
+              receipt.outcome !== outcome &&
+              !(receipt.outcome === "not_applied" && outcome === "failed")
+            )
+              throw new DeviceActionError(
+                "SMS receipt outcome conflicts with native evidence",
+              );
+            receipt = { ...receipt, result };
+          } catch {
+            throw new DeviceActionError("Invalid SMS receipt");
+          }
+        }
+      } else if (isClockOperation(payload.operation)) {
         try {
           if (receipt.outcome !== "unknown" || value.result !== undefined)
             receipt = {

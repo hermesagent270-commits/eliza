@@ -15,6 +15,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { findCatalogModel, isDefaultEligibleId } from "./catalog";
+import { withConfigFileLock } from "./config-file-lock";
 import { manifestPassesActivationGate } from "./manifest";
 import { localInferenceRoot } from "./paths";
 import { defaultManifestLoader, type ManifestLoader } from "./ram-budget";
@@ -50,6 +51,15 @@ interface AssignmentsFile {
 
 function assignmentsPath(): string {
 	return path.join(localInferenceRoot(), ASSIGNMENTS_FILENAME);
+}
+
+/**
+ * Run a read-modify-write of assignments.json under the same per-file lock
+ * as the HTTP routes, so a concurrent slot change (another slot, a finished
+ * download filling defaults) is not overwritten by a stale read.
+ */
+export function withAssignmentsLock<T>(task: () => Promise<T>): Promise<T> {
+	return withConfigFileLock(assignmentsPath(), task);
 }
 
 function isCuratedEliza1AssignmentId(modelId: string): boolean {
@@ -190,23 +200,25 @@ export async function setAssignment(
 	slot: AgentModelSlot,
 	modelId: string | null,
 ): Promise<ModelAssignments> {
-	const current = await readAssignments();
-	const next: ModelAssignments = { ...current };
-	if (modelId) {
-		if (!isCuratedEliza1AssignmentId(modelId)) {
-			throw new AssignmentRejectedError({
-				slot,
-				modelId,
-				message:
-					"Local inference assignments are limited to curated Eliza-1 tiers.",
-			});
+	return withAssignmentsLock(async () => {
+		const current = await readAssignments();
+		const next: ModelAssignments = { ...current };
+		if (modelId) {
+			if (!isCuratedEliza1AssignmentId(modelId)) {
+				throw new AssignmentRejectedError({
+					slot,
+					modelId,
+					message:
+						"Local inference assignments are limited to curated Eliza-1 tiers.",
+				});
+			}
+			next[slot] = modelId;
+		} else {
+			delete next[slot];
 		}
-		next[slot] = modelId;
-	} else {
-		delete next[slot];
-	}
-	await writeAssignments(next);
-	return next;
+		await writeAssignments(next);
+		return next;
+	});
 }
 
 /**
@@ -215,15 +227,17 @@ export async function setAssignment(
  * model fails every load even while another model is installed.
  */
 export async function clearAssignmentsForModel(modelId: string): Promise<void> {
-	const current = await readAssignments();
-	const next: ModelAssignments = {};
-	for (const [slot, assigned] of Object.entries(current) as Array<
-		[AgentModelSlot, string | undefined]
-	>) {
-		if (assigned && assigned !== modelId) next[slot] = assigned;
-	}
-	if (Object.keys(next).length === Object.keys(current).length) return;
-	await writeAssignments(next);
+	return withAssignmentsLock(async () => {
+		const current = await readAssignments();
+		const next: ModelAssignments = {};
+		for (const [slot, assigned] of Object.entries(current) as Array<
+			[AgentModelSlot, string | undefined]
+		>) {
+			if (assigned && assigned !== modelId) next[slot] = assigned;
+		}
+		if (Object.keys(next).length === Object.keys(current).length) return;
+		await writeAssignments(next);
+	});
 }
 
 /**
@@ -271,33 +285,35 @@ export function isEmbeddingModelId(modelId: string): boolean {
 export async function ensureDefaultAssignment(
 	modelId: string,
 ): Promise<ModelAssignments> {
-	const current = await readAssignments();
-	if (!isDefaultEligibleId(modelId)) return current;
+	return withAssignmentsLock(async () => {
+		const current = await readAssignments();
+		if (!isDefaultEligibleId(modelId)) return current;
 
-	const next: ModelAssignments = { ...current };
+		const next: ModelAssignments = { ...current };
 
-	if (isEmbeddingModelId(modelId)) {
-		if (!next.TEXT_EMBEDDING) next.TEXT_EMBEDDING = modelId;
-	} else {
-		if (!next.TEXT_SMALL) next.TEXT_SMALL = modelId;
-		if (!next.TEXT_LARGE) next.TEXT_LARGE = modelId;
-		if (!next.TEXT_TO_SPEECH) next.TEXT_TO_SPEECH = modelId;
-		if (!next.TRANSCRIPTION) next.TRANSCRIPTION = modelId;
-	}
+		if (isEmbeddingModelId(modelId)) {
+			if (!next.TEXT_EMBEDDING) next.TEXT_EMBEDDING = modelId;
+		} else {
+			if (!next.TEXT_SMALL) next.TEXT_SMALL = modelId;
+			if (!next.TEXT_LARGE) next.TEXT_LARGE = modelId;
+			if (!next.TEXT_TO_SPEECH) next.TEXT_TO_SPEECH = modelId;
+			if (!next.TRANSCRIPTION) next.TRANSCRIPTION = modelId;
+		}
 
-	// Cheap shortcut: skip the rewrite when nothing changed.
-	if (
-		next.TEXT_SMALL === current.TEXT_SMALL &&
-		next.TEXT_LARGE === current.TEXT_LARGE &&
-		next.TEXT_EMBEDDING === current.TEXT_EMBEDDING &&
-		next.TEXT_TO_SPEECH === current.TEXT_TO_SPEECH &&
-		next.TRANSCRIPTION === current.TRANSCRIPTION
-	) {
-		return current;
-	}
+		// Cheap shortcut: skip the rewrite when nothing changed.
+		if (
+			next.TEXT_SMALL === current.TEXT_SMALL &&
+			next.TEXT_LARGE === current.TEXT_LARGE &&
+			next.TEXT_EMBEDDING === current.TEXT_EMBEDDING &&
+			next.TEXT_TO_SPEECH === current.TEXT_TO_SPEECH &&
+			next.TRANSCRIPTION === current.TRANSCRIPTION
+		) {
+			return current;
+		}
 
-	await writeAssignments(next);
-	return next;
+		await writeAssignments(next);
+		return next;
+	});
 }
 
 /**

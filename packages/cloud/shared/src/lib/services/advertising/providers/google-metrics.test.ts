@@ -8,8 +8,13 @@ afterEach(() => {
 
 test("reads metrics from searchStream batches and retains the persisted integer contract", async () => {
   spies.push(
-    spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json([
+    spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (String(init?.body).includes("customer.time_zone")) {
+        return Response.json([
+          { results: [{ customer: { resourceName: "customers/123", timeZone: "UTC" } }] },
+        ]);
+      }
+      return Response.json([
         { results: [] },
         {
           results: [
@@ -24,8 +29,8 @@ test("reads metrics from searchStream batches and retains the persisted integer 
             },
           ],
         },
-      ]),
-    ),
+      ]);
+    }),
   );
   const result = await googleAdsProvider.getCampaignMetrics(
     { accessToken: "fixture-token" },

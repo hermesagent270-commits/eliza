@@ -34,6 +34,7 @@ const VOICE_MODEL_ROLES: Readonly<Record<VoiceModelId, VoiceComponentRole>> = {
 	wakeword: "unknown",
 	embedding: "voice",
 	asr: "asr",
+	"mobile-voice": "voice",
 };
 const VOICE_MODEL_NAMES: Readonly<Record<VoiceModelId, string>> = {
 	"speaker-encoder": "Speaker Encoder",
@@ -46,6 +47,7 @@ const VOICE_MODEL_NAMES: Readonly<Record<VoiceModelId, string>> = {
 	wakeword: "Wake Word",
 	embedding: "Voice Embedding",
 	asr: "ASR",
+	"mobile-voice": "Mobile Voice Bundle",
 };
 function providerForVoiceModel(id: VoiceModelId): string {
 	if (id === "kokoro") return "kokoro";

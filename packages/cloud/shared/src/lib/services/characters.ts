@@ -302,6 +302,32 @@ export class CharactersService {
     logger.info(`[Characters] Cache invalidated for character: ${id}`);
   }
 
+  /**
+   * Character read for an access decision. It skips the in-memory and Redis
+   * caches: a cached record in another isolate can still say public for up
+   * to the cache TTL after the owner made the character private.
+   */
+  async getByIdForAccessCheck(id: string): Promise<UserCharacter | undefined> {
+    return await userCharactersRepository.findById(id);
+  }
+
+  /**
+   * Whether a caller may see or link a character: the caller owns it, the
+   * caller's organization owns it, or it is public. One rule for the app
+   * link writes, the app character read and backup restore, so a character
+   * that leaves the public catalog also leaves every app that linked it.
+   */
+  isLinkedCharacterVisible(
+    character: Pick<UserCharacter, "user_id" | "organization_id" | "is_public">,
+    caller: { userId?: string; organizationId?: string },
+  ): boolean {
+    return (
+      character.is_public === true ||
+      (caller.userId !== undefined && character.user_id === caller.userId) ||
+      (caller.organizationId !== undefined && character.organization_id === caller.organizationId)
+    );
+  }
+
   async getByIdForUser(characterId: string, userId: string): Promise<UserCharacter | null> {
     const character = await userCharactersRepository.findById(characterId);
 
