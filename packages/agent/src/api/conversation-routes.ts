@@ -3556,10 +3556,7 @@ async function listConversationMessages(
       requestUrl.searchParams.get("limit"),
     );
     let hasMore = false;
-    // The oldest stored row this page read. Rows the projection below hides
-    // (scheduler prompts, textless action logs) can make a page come back
-    // empty; this cursor lets the client continue below them.
-    let nextCursor: { before: number; beforeId: string } | undefined;
+    let pageLimit = CONVERSATION_MESSAGE_WINDOW;
     let memories: Memory[];
     if (!aroundParam && beforeParam !== null) {
       const page = await loadConversationMessagesBefore(
@@ -3571,14 +3568,7 @@ async function listConversationMessages(
       );
       memories = page.memories;
       hasMore = page.hasMore;
-      const oldestRead = page.memories.at(-1);
-      if (
-        hasMore &&
-        oldestRead?.id &&
-        typeof oldestRead.createdAt === "number"
-      ) {
-        nextCursor = { before: oldestRead.createdAt, beforeId: oldestRead.id };
-      }
+      pageLimit = olderLimit;
     } else {
       memories = aroundParam
         ? await loadConversationMessagesAround(
@@ -3591,251 +3581,271 @@ async function listConversationMessages(
             tableName: "messages",
             limit: CONVERSATION_MESSAGE_WINDOW,
           });
+      hasMore = !aroundParam && memories.length === CONVERSATION_MESSAGE_WINDOW;
     }
-    // Sort by createdAt ascending
-    memories.sort(compareMemoriesByCreatedAt);
     const agentId = runtime.agentId;
     // Per-viewer attachment disclosure (#14781): a boundary-role viewer
     // token (WaifuChat, artifact share-viewer) carries a principal; trunk
     // owner tokens match no resolver, so the local dashboard resolves no
     // context and serves the full DTO unchanged.
     const viewerAccessContext = resolveHttpAccessContext(req);
-    const messages = memories
-      // Scheduler instructions are model input, not a user-authored chat turn.
-      // Project them out only here; stored history and assistant replies stay intact.
-      .filter(
-        (m) =>
-          m.entityId === agentId ||
-          m.content.source !== MESSAGE_SOURCE_TRIGGER_PROMPT,
-      )
-      .map((m) => {
-        const contentSource = (m.content as Record<string, unknown>)?.source;
-        const content = m.content as Record<string, unknown>;
-        const meta = m.metadata as Record<string, unknown> | undefined;
-        const entityName = meta?.entityName;
-        const replyToAuthor =
-          meta?.replyToAuthor && typeof meta.replyToAuthor === "object"
-            ? (meta.replyToAuthor as Record<string, unknown>)
-            : null;
-        const normalizedSource =
-          typeof contentSource === "string" &&
-          contentSource.length > 0 &&
-          contentSource !== MESSAGE_SOURCE_CLIENT_CHAT
-            ? contentSource
-            : undefined;
-        const actionName =
-          typeof content.action === "string" && content.action.length > 0
-            ? content.action
-            : undefined;
-        const actionCallbackHistory = normalizeActionCallbackHistory(
-          content.actionCallbackHistory,
-        );
-        const transcriptVisibility =
-          content.transcriptVisibility === "internal"
-            ? ("internal" as const)
-            : undefined;
-        // The failed assistant turn carries its classification on the live
-        // result (`content.failureKind`) or, for synthetic fallbacks, on
-        // `metadata.chatFailureKind` (markSyntheticChatFailureContent). Round
-        // it back so the renderer's provider/credits gate + Retry survive the
-        // GET /messages full-replace instead of vanishing.
-        const rawFailureKind =
-          typeof content.failureKind === "string"
-            ? content.failureKind
-            : typeof meta?.chatFailureKind === "string"
-              ? meta.chatFailureKind
+    const projectMessages = (rows: Memory[]) =>
+      rows
+        .sort(compareMemoriesByCreatedAt)
+        // Scheduler instructions are model input, not a user-authored chat turn.
+        // Project them out only here; stored history and assistant replies stay intact.
+        .filter(
+          (m) =>
+            m.entityId === agentId ||
+            m.content.source !== MESSAGE_SOURCE_TRIGGER_PROMPT,
+        )
+        .map((m) => {
+          const contentSource = (m.content as Record<string, unknown>)?.source;
+          const content = m.content as Record<string, unknown>;
+          const meta = m.metadata as Record<string, unknown> | undefined;
+          const entityName = meta?.entityName;
+          const replyToAuthor =
+            meta?.replyToAuthor && typeof meta.replyToAuthor === "object"
+              ? (meta.replyToAuthor as Record<string, unknown>)
+              : null;
+          const normalizedSource =
+            typeof contentSource === "string" &&
+            contentSource.length > 0 &&
+            contentSource !== MESSAGE_SOURCE_CLIENT_CHAT
+              ? contentSource
               : undefined;
-        const legacyNotice =
-          m.entityId === agentId &&
-          content.metadata &&
-          typeof content.metadata === "object" &&
-          "escalation" in content.metadata &&
-          content.metadata.escalation === true &&
-          typeof content.text === "string"
-            ? projectLegacySystemNotice(content.text)
-            : undefined;
-        const systemNotice =
-          m.entityId === agentId
-            ? (readSystemNotice(content.systemNotice) ??
-              legacyNotice?.systemNotice ??
-              (contentSource === "lifeops-scheduled-task" &&
-              typeof content.text === "string" &&
-              isLegacyUnavailableCheckin(content.text)
-                ? "runtime-error"
-                : undefined))
-            : undefined;
-        const failureKind =
-          systemNotice === "model-unavailable" ||
-          systemNotice === "model-and-runtime-error"
-            ? "no_provider"
-            : parseChatFailureKind(rawFailureKind);
-        const terminalFailure = parseChatTerminalFailure(
-          content.terminalFailure,
-        );
-        // The CONNECT_ACCOUNT action stamps `content.accountConnect` on the
-        // assistant memory. Validate + round-trip it so the inline
-        // AddAccountDialog entry point survives the GET /messages replace.
-        const accountConnect = normalizeAccountConnectRequest(
-          content.accountConnect,
-        );
-        const role = m.entityId === agentId ? "assistant" : "user";
-        const userTextFormat =
-          role === "user"
-            ? parseChatUserTextFormat(
-                isRecord(content.metadata)
-                  ? content.metadata.userTextFormat
-                  : undefined,
-              )
-            : undefined;
-        // Only a marker bound to this row's own ID names its client turn.
-        const chatMarker =
-          role === "user"
-            ? readDurableConversationChatMarker(content.chatIdempotency)
-            : undefined;
-        const clientMessageId =
-          chatMarker &&
-          conversationClientUserMemoryId(
-            chatMarker.scope,
-            chatMarker.clientMessageId,
-          ) === m.id
-            ? chatMarker.clientMessageId
-            : undefined;
-        const interrupted = content.interrupted === true;
-        const rawText = formatConversationMessageText(
-          (
-            m.content as {
-              text?: string;
-            }
-          )?.text ?? "",
-          actionCallbackHistory,
-        );
-        // An interrupted receipt may intentionally have no model text. Keep
-        // its exact partial reply; the interruption metadata owns its status.
-        const text =
-          transcriptVisibility === "internal"
-            ? ""
-            : systemNotice
-              ? systemNoticeText(systemNotice)
-              : legacyNotice
-                ? legacyNotice.text
-                : role === "assistant" &&
-                    isIntentionalNoResponseResult(
-                      { responseContent: m.content },
-                      rawText,
-                    )
-                  ? ""
-                  : role === "assistant" && !interrupted
-                    ? normalizeChatResponseText(
+          const actionName =
+            typeof content.action === "string" && content.action.length > 0
+              ? content.action
+              : undefined;
+          const actionCallbackHistory = normalizeActionCallbackHistory(
+            content.actionCallbackHistory,
+          );
+          const transcriptVisibility =
+            content.transcriptVisibility === "internal"
+              ? ("internal" as const)
+              : undefined;
+          // The failed assistant turn carries its classification on the live
+          // result (`content.failureKind`) or, for synthetic fallbacks, on
+          // `metadata.chatFailureKind` (markSyntheticChatFailureContent). Round
+          // it back so the renderer's provider/credits gate + Retry survive the
+          // GET /messages full-replace instead of vanishing.
+          const rawFailureKind =
+            typeof content.failureKind === "string"
+              ? content.failureKind
+              : typeof meta?.chatFailureKind === "string"
+                ? meta.chatFailureKind
+                : undefined;
+          const legacyNotice =
+            m.entityId === agentId &&
+            content.metadata &&
+            typeof content.metadata === "object" &&
+            "escalation" in content.metadata &&
+            content.metadata.escalation === true &&
+            typeof content.text === "string"
+              ? projectLegacySystemNotice(content.text)
+              : undefined;
+          const systemNotice =
+            m.entityId === agentId
+              ? (readSystemNotice(content.systemNotice) ??
+                legacyNotice?.systemNotice ??
+                (contentSource === "lifeops-scheduled-task" &&
+                typeof content.text === "string" &&
+                isLegacyUnavailableCheckin(content.text)
+                  ? "runtime-error"
+                  : undefined))
+              : undefined;
+          const failureKind =
+            systemNotice === "model-unavailable" ||
+            systemNotice === "model-and-runtime-error"
+              ? "no_provider"
+              : parseChatFailureKind(rawFailureKind);
+          const terminalFailure = parseChatTerminalFailure(
+            content.terminalFailure,
+          );
+          // The CONNECT_ACCOUNT action stamps `content.accountConnect` on the
+          // assistant memory. Validate + round-trip it so the inline
+          // AddAccountDialog entry point survives the GET /messages replace.
+          const accountConnect = normalizeAccountConnectRequest(
+            content.accountConnect,
+          );
+          const role = m.entityId === agentId ? "assistant" : "user";
+          const userTextFormat =
+            role === "user"
+              ? parseChatUserTextFormat(
+                  isRecord(content.metadata)
+                    ? content.metadata.userTextFormat
+                    : undefined,
+                )
+              : undefined;
+          // Only a marker bound to this row's own ID names its client turn.
+          const chatMarker =
+            role === "user"
+              ? readDurableConversationChatMarker(content.chatIdempotency)
+              : undefined;
+          const clientMessageId =
+            chatMarker &&
+            conversationClientUserMemoryId(
+              chatMarker.scope,
+              chatMarker.clientMessageId,
+            ) === m.id
+              ? chatMarker.clientMessageId
+              : undefined;
+          const interrupted = content.interrupted === true;
+          const rawText = formatConversationMessageText(
+            (
+              m.content as {
+                text?: string;
+              }
+            )?.text ?? "",
+            actionCallbackHistory,
+          );
+          // An interrupted receipt may intentionally have no model text. Keep
+          // its exact partial reply; the interruption metadata owns its status.
+          const text =
+            transcriptVisibility === "internal"
+              ? ""
+              : systemNotice
+                ? systemNoticeText(systemNotice)
+                : legacyNotice
+                  ? legacyNotice.text
+                  : role === "assistant" &&
+                      isIntentionalNoResponseResult(
+                        { responseContent: m.content },
                         rawText,
-                        state.logBuffer,
-                        runtime,
                       )
-                    : rawText;
-        const attachments = selectAttachmentsForViewer(
-          m,
-          viewerAccessContext,
-          agentId,
-        );
-        const topics =
-          Array.isArray(meta?.topics) && meta.topics.length > 0
-            ? (meta.topics as unknown[]).filter(
-                (topic): topic is string => typeof topic === "string",
-              )
-            : undefined;
-        return {
-          id: m.id ?? "",
-          role,
-          text,
-          ...(userTextFormat ? { userTextFormat } : {}),
-          ...(clientMessageId ? { clientMessageId } : {}),
-          ...(role === "assistant" &&
-          typeof content.planningAcknowledgment === "string"
-            ? { planningAcknowledgment: content.planningAcknowledgment }
-            : {}),
-          timestamp: m.createdAt ?? 0,
-          ...(content.replyRecoveryAvailable === true
-            ? { replyRecoveryAvailable: true as const }
-            : {}),
-          ...(transcriptVisibility ? { transcriptVisibility } : {}),
-          ...(attachments ? { attachments } : {}),
-          ...(topics && topics.length > 0 ? { topics } : {}),
-          source: normalizedSource,
-          actionName,
-          actionCallbackHistory:
-            actionCallbackHistory.length > 0
-              ? [...actionCallbackHistory]
-              : undefined,
-          from:
-            typeof entityName === "string" && entityName.length > 0
-              ? entityName
-              : undefined,
-          fromUserName:
-            typeof meta?.entityUserName === "string" &&
-            meta.entityUserName.length > 0
-              ? meta.entityUserName
-              : undefined,
-          avatarUrl:
-            typeof meta?.entityAvatarUrl === "string" &&
-            meta.entityAvatarUrl.length > 0
-              ? meta.entityAvatarUrl
-              : undefined,
-          replyToMessageId:
-            typeof content.inReplyTo === "string" &&
-            content.inReplyTo.length > 0
-              ? content.inReplyTo
-              : typeof meta?.replyToMessageId === "string" &&
-                  meta.replyToMessageId.length > 0
-                ? meta.replyToMessageId
+                    ? ""
+                    : role === "assistant" && !interrupted
+                      ? normalizeChatResponseText(
+                          rawText,
+                          state.logBuffer,
+                          runtime,
+                        )
+                      : rawText;
+          const attachments = selectAttachmentsForViewer(
+            m,
+            viewerAccessContext,
+            agentId,
+          );
+          const topics =
+            Array.isArray(meta?.topics) && meta.topics.length > 0
+              ? (meta.topics as unknown[]).filter(
+                  (topic): topic is string => typeof topic === "string",
+                )
+              : undefined;
+          return {
+            id: m.id ?? "",
+            role,
+            text,
+            ...(userTextFormat ? { userTextFormat } : {}),
+            ...(clientMessageId ? { clientMessageId } : {}),
+            ...(role === "assistant" &&
+            typeof content.planningAcknowledgment === "string"
+              ? { planningAcknowledgment: content.planningAcknowledgment }
+              : {}),
+            timestamp: m.createdAt ?? 0,
+            ...(content.replyRecoveryAvailable === true
+              ? { replyRecoveryAvailable: true as const }
+              : {}),
+            ...(transcriptVisibility ? { transcriptVisibility } : {}),
+            ...(attachments ? { attachments } : {}),
+            ...(topics && topics.length > 0 ? { topics } : {}),
+            source: normalizedSource,
+            actionName,
+            actionCallbackHistory:
+              actionCallbackHistory.length > 0
+                ? [...actionCallbackHistory]
                 : undefined,
-          replyToSenderName:
-            typeof meta?.replyToSenderName === "string" &&
-            meta.replyToSenderName.length > 0
-              ? meta.replyToSenderName
-              : typeof replyToAuthor?.displayName === "string" &&
-                  replyToAuthor.displayName.length > 0
-                ? replyToAuthor.displayName
+            from:
+              typeof entityName === "string" && entityName.length > 0
+                ? entityName
+                : undefined,
+            fromUserName:
+              typeof meta?.entityUserName === "string" &&
+              meta.entityUserName.length > 0
+                ? meta.entityUserName
+                : undefined,
+            avatarUrl:
+              typeof meta?.entityAvatarUrl === "string" &&
+              meta.entityAvatarUrl.length > 0
+                ? meta.entityAvatarUrl
+                : undefined,
+            replyToMessageId:
+              typeof content.inReplyTo === "string" &&
+              content.inReplyTo.length > 0
+                ? content.inReplyTo
+                : typeof meta?.replyToMessageId === "string" &&
+                    meta.replyToMessageId.length > 0
+                  ? meta.replyToMessageId
+                  : undefined,
+            replyToSenderName:
+              typeof meta?.replyToSenderName === "string" &&
+              meta.replyToSenderName.length > 0
+                ? meta.replyToSenderName
+                : typeof replyToAuthor?.displayName === "string" &&
+                    replyToAuthor.displayName.length > 0
+                  ? replyToAuthor.displayName
+                  : typeof replyToAuthor?.username === "string" &&
+                      replyToAuthor.username.length > 0
+                    ? replyToAuthor.username
+                    : undefined,
+            replyToSenderUserName:
+              typeof meta?.replyToSenderUserName === "string" &&
+              meta.replyToSenderUserName.length > 0
+                ? meta.replyToSenderUserName
                 : typeof replyToAuthor?.username === "string" &&
                     replyToAuthor.username.length > 0
                   ? replyToAuthor.username
                   : undefined,
-          replyToSenderUserName:
-            typeof meta?.replyToSenderUserName === "string" &&
-            meta.replyToSenderUserName.length > 0
-              ? meta.replyToSenderUserName
-              : typeof replyToAuthor?.username === "string" &&
-                  replyToAuthor.username.length > 0
-                ? replyToAuthor.username
-                : undefined,
-          rawDiscordChannelId: extractConversationMetaString(
-            m,
-            "discordChannelId",
-          ),
-          rawDiscordMessageId: extractConversationMetaString(
-            m,
-            "discordMessageId",
-          ),
-          rawSenderId: extractConversationMetaString(m, "fromId"),
-          senderEntityId:
-            typeof m.entityId === "string" ? m.entityId : undefined,
-          ...(failureKind ? { failureKind } : {}),
-          ...(terminalFailure ? { terminalFailure } : {}),
-          ...(accountConnect ? { accountConnect } : {}),
-          ...(interrupted ? { interrupted: true } : {}),
-        } satisfies ConversationRouteMessageRecord;
-      })
-      // Drop action-log memories that have no visible text (e.g.
-      // plugin action logs with only `thought` / `actions` fields).
-      // Without this filter they appear as blank chat bubbles. Image-only
-      // turns (uploaded or generated media with no caption) are kept.
-      .filter(
-        (m) =>
-          m.text.trim().length > 0 ||
-          (m.attachments?.length ?? 0) > 0 ||
-          // A zero-token interrupted receipt has no text but IS the turn's
-          // terminal state; dropping it would leave the user turn unanswered
-          // on reload and invite regeneration.
-          m.interrupted === true,
+            rawDiscordChannelId: extractConversationMetaString(
+              m,
+              "discordChannelId",
+            ),
+            rawDiscordMessageId: extractConversationMetaString(
+              m,
+              "discordMessageId",
+            ),
+            rawSenderId: extractConversationMetaString(m, "fromId"),
+            senderEntityId:
+              typeof m.entityId === "string" ? m.entityId : undefined,
+            ...(failureKind ? { failureKind } : {}),
+            ...(terminalFailure ? { terminalFailure } : {}),
+            ...(accountConnect ? { accountConnect } : {}),
+            ...(interrupted ? { interrupted: true } : {}),
+          } satisfies ConversationRouteMessageRecord;
+        })
+        // Drop action-log memories that have no visible text (e.g.
+        // plugin action logs with only `thought` / `actions` fields).
+        // Without this filter they appear as blank chat bubbles. Image-only
+        // turns (uploaded or generated media with no caption) are kept.
+        .filter(
+          (m) =>
+            m.text.trim().length > 0 ||
+            (m.attachments?.length ?? 0) > 0 ||
+            // A zero-token interrupted receipt has no text but IS the turn's
+            // terminal state; dropping it would leave the user turn unanswered
+            // on reload and invite regeneration.
+            m.interrupted === true,
+        );
+    let messages = projectMessages(memories);
+    // The projection hides scheduler prompts and textless action logs after the
+    // read, so a window of only those rows came back empty and the client took
+    // it as the start of history. Keep reading older rows until a visible turn
+    // or the start of history. The around window is a fixed read (hasMore stays false).
+    while (messages.length === 0 && hasMore) {
+      const oldestRead = memories[0];
+      if (!oldestRead?.id || typeof oldestRead.createdAt !== "number") break;
+      const page = await loadConversationMessagesBefore(
+        runtime,
+        conv.roomId,
+        oldestRead.createdAt,
+        pageLimit,
+        oldestRead.id,
       );
+      memories = page.memories;
+      hasMore = page.hasMore;
+      messages = projectMessages(memories);
+    }
     const discordMessages = messages.filter((message) =>
       mayNeedDiscordMessageEnrichment(message.source),
     );
@@ -3934,17 +3944,7 @@ async function listConversationMessages(
       // Only the load-older (`before`) path advertises pagination state; the
       // recent + around windows are single fixed reads and omit it so their
       // response shape is unchanged.
-      ...(beforeParam !== null && !aroundParam
-        ? {
-            hasMore,
-            ...(nextCursor
-              ? {
-                  nextBefore: nextCursor.before,
-                  nextBeforeId: nextCursor.beforeId,
-                }
-              : {}),
-          }
-        : {}),
+      ...(beforeParam !== null && !aroundParam ? { hasMore } : {}),
     });
   } catch (err) {
     logger.warn(
