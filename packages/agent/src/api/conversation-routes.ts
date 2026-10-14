@@ -3556,6 +3556,10 @@ async function listConversationMessages(
       requestUrl.searchParams.get("limit"),
     );
     let hasMore = false;
+    // The oldest stored row this page read. Rows the projection below hides
+    // (scheduler prompts, textless action logs) can make a page come back
+    // empty; this cursor lets the client continue below them.
+    let nextCursor: { before: number; beforeId: string } | undefined;
     let memories: Memory[];
     if (!aroundParam && beforeParam !== null) {
       const page = await loadConversationMessagesBefore(
@@ -3567,6 +3571,14 @@ async function listConversationMessages(
       );
       memories = page.memories;
       hasMore = page.hasMore;
+      const oldestRead = page.memories.at(-1);
+      if (
+        hasMore &&
+        oldestRead?.id &&
+        typeof oldestRead.createdAt === "number"
+      ) {
+        nextCursor = { before: oldestRead.createdAt, beforeId: oldestRead.id };
+      }
     } else {
       memories = aroundParam
         ? await loadConversationMessagesAround(
@@ -3922,7 +3934,17 @@ async function listConversationMessages(
       // Only the load-older (`before`) path advertises pagination state; the
       // recent + around windows are single fixed reads and omit it so their
       // response shape is unchanged.
-      ...(beforeParam !== null && !aroundParam ? { hasMore } : {}),
+      ...(beforeParam !== null && !aroundParam
+        ? {
+            hasMore,
+            ...(nextCursor
+              ? {
+                  nextBefore: nextCursor.before,
+                  nextBeforeId: nextCursor.beforeId,
+                }
+              : {}),
+          }
+        : {}),
     });
   } catch (err) {
     logger.warn(

@@ -333,6 +333,9 @@ declare module "./client-base.js" {
     ): Promise<{
       messages: ConversationMessage[];
       hasMore?: boolean;
+      /** Cursor below the oldest stored row the page read (load-older only). */
+      nextBefore?: number;
+      nextBeforeId?: string;
     }>;
     /**
      * Keyword search across every conversation the user can see, ranked by
@@ -1095,6 +1098,8 @@ ElizaClient.prototype.getConversationMessages = async function (
   let response: {
     messages: ConversationMessage[];
     hasMore?: boolean;
+    nextBefore?: number;
+    nextBeforeId?: string;
   } | null = null;
   // The desktop-bridge RPC only serves the recent window; an `around` jump or a
   // `before` load-older page must go straight to HTTP so the server can center
@@ -1129,6 +1134,8 @@ ElizaClient.prototype.getConversationMessages = async function (
   response ??= await this.fetch<{
     messages: ConversationMessage[];
     hasMore?: boolean;
+    nextBefore?: number;
+    nextBeforeId?: string;
   }>(
     `/api/conversations/${encodeURIComponent(id)}/messages${query}`,
     options?.signal ? { signal: options.signal } : undefined,
@@ -1143,6 +1150,9 @@ ElizaClient.prototype.getConversationMessages = async function (
     }),
     ...(typeof response.hasMore === "boolean"
       ? { hasMore: response.hasMore }
+      : {}),
+    ...(typeof response.nextBefore === "number"
+      ? { nextBefore: response.nextBefore, nextBeforeId: response.nextBeforeId }
       : {}),
   };
 };

@@ -27,7 +27,13 @@ export interface LoadOlderClient {
       beforeId?: string;
       limit?: number;
     },
-  ): Promise<{ messages: ConversationMessage[]; hasMore?: boolean }>;
+  ): Promise<{
+    messages: ConversationMessage[];
+    hasMore?: boolean;
+    /** Cursor below the oldest stored row the server read for this page. */
+    nextBefore?: number;
+    nextBeforeId?: string;
+  }>;
 }
 
 export interface LoadOlderConversationMessagesDeps {
@@ -110,12 +116,16 @@ export async function loadOlderConversationMessages(
       ...(signal ? { signal } : {}),
     });
 
-    if (response.messages.length === 0) {
+    const hasMore = response.hasMore === true;
+    // An empty page continues only when the server names where to continue.
+    if (
+      response.messages.length === 0 &&
+      (!hasMore || typeof response.nextBefore !== "number")
+    ) {
       return { hasMore: false, prependedCount: 0 };
     }
 
     const older = filterRenderableConversationMessages(response.messages);
-    const hasMore = response.hasMore === true;
 
     if (older.length > 0) {
       const added = prependMessages(older);
@@ -131,9 +141,17 @@ export async function loadOlderConversationMessages(
     // (messages arrive ascending; [0] is its oldest) and fetch the next one —
     // the retained thread's oldest message can't move, so without this hop the
     // next attempt would refetch this exact page.
+    // The server's cursor covers rows it hid from the page too; fall back to
+    // the oldest returned message when it does not send one.
     const nextMessage = response.messages[0];
-    const nextCursor = nextMessage?.timestamp;
-    const nextCursorId = cursorMessageId(nextMessage?.id);
+    const nextCursor =
+      typeof response.nextBefore === "number"
+        ? response.nextBefore
+        : nextMessage?.timestamp;
+    const nextCursorId =
+      typeof response.nextBefore === "number"
+        ? cursorMessageId(response.nextBeforeId)
+        : cursorMessageId(nextMessage?.id);
     const advanced =
       typeof nextCursor === "number" &&
       Number.isFinite(nextCursor) &&
