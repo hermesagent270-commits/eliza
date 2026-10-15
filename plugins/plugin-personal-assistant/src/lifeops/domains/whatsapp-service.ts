@@ -75,12 +75,14 @@ function whatsAppServiceCanRead(
 function whatsAppServiceConnected(
   service: WhatsAppRuntimeServiceLike | null,
 ): boolean {
-  return Boolean(
-    service?.connected === true ||
-      service?.isServiceConnected?.() === true ||
-      whatsAppServiceCanSend(service) ||
-      whatsAppServiceCanRead(service),
-  );
+  if (!service) return false;
+  if (typeof service.isServiceConnected === "function") {
+    return service.isServiceConnected() === true;
+  }
+  if (typeof service.connected === "boolean") {
+    return service.connected;
+  }
+  return whatsAppServiceCanSend(service) || whatsAppServiceCanRead(service);
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -144,11 +146,13 @@ export class WhatsAppDomain {
   async getWhatsAppConnectorStatus(): Promise<LifeOpsWhatsAppConnectorStatus> {
     const runtimeService = getWhatsAppRuntimeService(this.ctx.runtime);
     const serviceConnected = whatsAppServiceConnected(runtimeService);
-    const outboundReady = whatsAppServiceCanSend(runtimeService);
-    const inboundReady = whatsAppServiceCanRead(runtimeService);
+    const outboundReady =
+      serviceConnected && whatsAppServiceCanSend(runtimeService);
+    const inboundReady =
+      serviceConnected && whatsAppServiceCanRead(runtimeService);
     const status: LifeOpsWhatsAppConnectorStatus = {
       provider: "whatsapp",
-      connected: outboundReady || inboundReady,
+      connected: serviceConnected && (outboundReady || inboundReady),
       inbound: true,
       ...(runtimeService?.phoneNumber
         ? { phoneNumber: runtimeService.phoneNumber }
@@ -210,6 +214,13 @@ export class WhatsAppDomain {
   async sendWhatsAppMessage(
     req: WhatsAppSendRequest,
   ): Promise<{ ok: true; messageId: string }> {
+    const status = await this.getWhatsAppConnectorStatus();
+    if (!status.serviceConnected) {
+      fail(409, "WhatsApp runtime service is disconnected.");
+    }
+    if (!status.outboundReady) {
+      fail(503, "WhatsApp runtime service send is unavailable.");
+    }
     const delegated = await sendWhatsAppMessageWithRuntimeService({
       runtime: this.ctx.runtime,
       request: req,

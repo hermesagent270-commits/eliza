@@ -13,6 +13,7 @@ import {
 } from "@elizaos/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGoogleConnectorAccountProvider } from "../../../plugin-google-workspace/src/connector-account-provider.js";
+import { LifeOpsService } from "../lifeops/service.js";
 import { connectorAction } from "./connector.js";
 
 vi.mock("@elizaos/plugin-assistant", async (importOriginal) => ({
@@ -194,5 +195,34 @@ describe("CONNECTOR Google capability selection", () => {
     const google = await disconnect("google");
     expect(google.success).toBe(false);
     expect(google.data.requiresConfirmation).toBe(true);
+  });
+});
+
+describe("CONNECTOR WhatsApp runtime status", () => {
+  it("keeps an explicitly disconnected transport offline and does not call send", async () => {
+    const sendMessage = vi.fn(async () => ({
+      messages: [{ id: "unexpected-send" }],
+    }));
+    vi.spyOn(runtime, "getService").mockImplementation((serviceType) =>
+      serviceType === "whatsapp"
+        ? ({
+            connected: false,
+            isServiceConnected: () => false,
+            sendMessage,
+          } as never)
+        : null,
+    );
+    const service = new LifeOpsService(runtime);
+
+    await expect(service.getWhatsAppConnectorStatus()).resolves.toMatchObject({
+      connected: false,
+      serviceConnected: false,
+      outboundReady: false,
+      degradations: [{ code: "whatsapp_plugin_disconnected" }],
+    });
+    await expect(
+      service.sendWhatsAppMessage({ to: "+15555550123", text: "Hello" }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
