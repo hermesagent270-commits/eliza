@@ -29,7 +29,8 @@ describe("managed Gmail owner boundary", () => {
       "ELIZA_MANAGED_GMAIL_SEND_BROKER",
       "http://127.0.0.1:5209/__alpha-owner-gmail",
     );
-    let dispatches = 0,
+    let prepares = 0,
+      dispatches = 0,
       accepted = false,
       id = "",
       digest = "a".repeat(64);
@@ -43,6 +44,7 @@ describe("managed Gmail owner boundary", () => {
         providerResult: accepted ? { messageId: "provider-accepted" } : null,
       });
       if (input.operation === "prepare") {
+        prepares++;
         id = `alpha-gmail-send:${"b".repeat(64)}:${input.requestId}`;
         return Response.json({
           send: {
@@ -87,13 +89,22 @@ describe("managed Gmail owner boundary", () => {
     expect(Object.hasOwn(draft, "requester")).toBe(false);
     expect(dispatches).toBe(0);
     // New reviews must not evict an older pending draft or its send receipt binding.
-    for (let index = 0; index < 100; index++) {
+    for (let index = 0; index < 99; index++) {
       await service.draftFollowup(runtime, {
         ...snapshot,
         subject: `Later review ${index}`,
         requester,
       });
     }
+    expect(prepares).toBe(100);
+    await expect(
+      service.draftFollowup(runtime, {
+        ...snapshot,
+        subject: "One review too many",
+        requester,
+      }),
+    ).rejects.toThrow("100 unresolved reviewed drafts");
+    expect(prepares).toBe(100);
     await expect(
       adapter.sendDraft(runtime, draft.draftId, {
         requester,
@@ -116,6 +127,33 @@ describe("managed Gmail owner boundary", () => {
       adapter.sendDraft(runtime, draft.draftId, { requester, snapshot }),
     ).resolves.toEqual({ externalId: "provider-accepted" });
     expect(dispatches).toBe(1);
+    accepted = false;
+    const replacements = await Promise.allSettled([
+      service.draftFollowup(runtime, {
+        ...snapshot,
+        subject: "First replacement after confirmed delivery",
+        requester,
+      }),
+      service.draftFollowup(runtime, {
+        ...snapshot,
+        subject: "Concurrent replacement",
+        requester,
+      }),
+    ]);
+    expect(
+      replacements.filter(({ status }) => status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      replacements.filter(({ status }) => status === "rejected"),
+    ).toHaveLength(1);
+    expect(
+      replacements.find(({ status }) => status === "rejected"),
+    ).toMatchObject({
+      reason: expect.objectContaining({
+        message: expect.stringContaining("100 unresolved reviewed drafts"),
+      }),
+    });
+    expect(prepares).toBe(101);
     access.allowed = false;
     await expect(
       service.sendDraft(runtime, draft.draftId, undefined, requester),

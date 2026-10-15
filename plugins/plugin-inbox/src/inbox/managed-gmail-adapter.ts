@@ -32,6 +32,7 @@ import {
 
 const unavailable = (message: string) =>
   new ElizaError(message, { code: "MANAGED_GMAIL_READ_UNAVAILABLE" });
+const MAX_MANAGED_GMAIL_DRAFTS = 100;
 async function owner(runtime: IAgentRuntime, requester?: Memory) {
   if (!requester)
     throw unavailable("Gmail reads require a current owner request.");
@@ -57,8 +58,30 @@ export class ManagedGmailAdapter extends BaseMessageAdapter {
       content: ManagedSendContent;
       reviewDigest: string;
       attempted: boolean;
+      succeeded: boolean;
     }
   >();
+  private preparingDrafts = 0;
+  private reserveDraftCapacity() {
+    while (
+      this.drafts.size + this.preparingDrafts >=
+      MAX_MANAGED_GMAIL_DRAFTS
+    ) {
+      let succeededId: string | undefined;
+      for (const [draftId, draft] of this.drafts) {
+        if (draft.succeeded) {
+          succeededId = draftId;
+          break;
+        }
+      }
+      if (!succeededId)
+        throw unavailable(
+          `Managed Gmail already has ${MAX_MANAGED_GMAIL_DRAFTS} unresolved reviewed drafts. Send an existing reviewed draft or restart the agent before preparing another.`,
+        );
+      this.drafts.delete(succeededId);
+    }
+    this.preparingDrafts++;
+  }
   isAvailable() {
     return Boolean(this.fetcher && this.reader);
   }
@@ -114,20 +137,26 @@ export class ManagedGmailAdapter extends BaseMessageAdapter {
       subject: draft.subject ?? "",
       bodyText: draft.body,
     };
-    const prepared = await this.sender.prepare(content);
-    await owner(runtime, context?.requester);
-    this.drafts.set(prepared.id, {
-      agentId: runtime.agentId,
-      entityId: caller.entityId,
-      roomId: caller.roomId,
-      content: structuredClone(content),
-      reviewDigest: prepared.reviewDigest,
-      attempted: false,
-    });
-    return {
-      draftId: prepared.id,
-      preview: `From: ${prepared.from}\nTo: ${content.to.join(", ")}\nSubject: ${content.subject}\n\n${content.bodyText}`,
-    };
+    this.reserveDraftCapacity();
+    try {
+      const prepared = await this.sender.prepare(content);
+      await owner(runtime, context?.requester);
+      this.drafts.set(prepared.id, {
+        agentId: runtime.agentId,
+        entityId: caller.entityId,
+        roomId: caller.roomId,
+        content: structuredClone(content),
+        reviewDigest: prepared.reviewDigest,
+        attempted: false,
+        succeeded: false,
+      });
+      return {
+        draftId: prepared.id,
+        preview: `From: ${prepared.from}\nTo: ${content.to.join(", ")}\nSubject: ${content.subject}\n\n${content.bodyText}`,
+      };
+    } finally {
+      this.preparingDrafts--;
+    }
   }
   protected async sendDraftImpl(
     runtime: IAgentRuntime,
@@ -163,6 +192,7 @@ export class ManagedGmailAdapter extends BaseMessageAdapter {
         throw unavailable(
           "Delivery is not confirmed. Check this exact saved receipt; do not send this email again.",
         );
+      draft.succeeded = true;
       return { externalId: receipt.providerResult.messageId };
     };
     const prior = await this.sender.receipt(draftId);
