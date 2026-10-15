@@ -818,12 +818,21 @@ export class GoogleGmailAdapter extends BaseMessageAdapter {
         reason: `Gmail adapter does not support ${op.kind}`,
       };
     }
-    await service.modifyGmailMessages({
+    const providerMessageId = externalMessageId(messageId);
+    const receipt = await service.modifyGmailMessages({
       accountId,
       operation: mapped.operation,
-      messageIds: [externalMessageId(messageId)],
+      messageIds: [providerMessageId],
       labelIds: mapped.labelIds,
     });
+    const failure = receipt.failures.find((candidate) => candidate.messageId === providerMessageId);
+    if (failure) {
+      const status = failure.code === null ? "unknown" : String(failure.code);
+      return {
+        ok: false,
+        reason: `Gmail did not complete ${mapped.operation} for message ${messageId} (provider status ${status}${failure.retryable ? "; retryable" : ""}).`,
+      };
+    }
     if (op.kind === "mark_read" && op.read) {
       const externalId = externalMessageId(messageId);
       await emitCommittedGmailMutation(runtime, {
