@@ -658,6 +658,81 @@ it("persists an explicit in-app-only reminder without native projection", async 
     native.mockRestore();
   }
 }, 120000);
+
+it("keeps the native reminder id until deletion succeeds", async () => {
+  const nativeDelete = vi
+    .spyOn(appleReminders, "deleteNativeAppleReminderLikeItem")
+    .mockResolvedValueOnce({
+      ok: false,
+      reason: "native_error",
+      message: "test deletion failed",
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      data: { provider: "apple_reminders" },
+    });
+  const service = new LifeOpsService(runtime, {
+    ownerEntityId: runtime.agentId,
+  });
+  try {
+    const { definition } = await service.createDefinition({
+      title: "Native deletion retry",
+      kind: "task",
+      cadence: {
+        kind: "once",
+        dueAt: "2026-11-01T12:00:00.000Z",
+      },
+      timezone: "UTC",
+      reminderPlan: null,
+    });
+    const previousDefinition = {
+      ...definition,
+      metadata: {
+        ...definition.metadata,
+        nativeAppleReminder: {
+          kind: "reminder",
+          provider: "apple_reminders",
+          reminderId: "native-reminder-1",
+          source: "llm",
+        },
+      },
+    };
+    const recurringDefinition = {
+      ...previousDefinition,
+      cadence: {
+        kind: "daily" as const,
+        windows: ["morning" as const],
+      },
+    };
+
+    const failed =
+      await service.remindersDomain.syncNativeAppleReminderForDefinition({
+        definition: recurringDefinition,
+        previousDefinition,
+      });
+    expect(failed?.metadata.nativeAppleReminder).toMatchObject({
+      reminderId: "native-reminder-1",
+    });
+
+    const retried =
+      await service.remindersDomain.syncNativeAppleReminderForDefinition({
+        definition: failed,
+        previousDefinition: failed,
+      });
+    expect(retried?.metadata.nativeAppleReminder).toMatchObject({
+      reminderId: null,
+    });
+    expect(nativeDelete).toHaveBeenNthCalledWith(1, "native-reminder-1", {
+      runtime,
+    });
+    expect(nativeDelete).toHaveBeenNthCalledWith(2, "native-reminder-1", {
+      runtime,
+    });
+  } finally {
+    nativeDelete.mockRestore();
+  }
+}, 120000);
+
 it("does not create a timed reminder when destination recovery has no usable plan", async () => {
   const service = new LifeOpsService(runtime, {
     ownerEntityId: runtime.agentId,

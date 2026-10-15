@@ -2099,11 +2099,13 @@ export class RemindersDomain {
       args.definition.domain !== "user_lifeops" ||
       args.definition.cadence.kind !== "once"
     ) {
+      let nativeReminderDeleted = previousReminderId === null;
       if (previousReminderId) {
         const deleteResult = await deleteNativeAppleReminderLikeItem(
           previousReminderId,
           { runtime: this.ctx.runtime },
         );
+        nativeReminderDeleted = deleteResult.ok;
         if (deleteResult.ok === false) {
           this.ctx.logLifeOpsWarn(
             "native_apple_reminder_sync",
@@ -2122,7 +2124,11 @@ export class RemindersDomain {
           );
         }
       }
-      if (args.definition && nextMetadata?.reminderId) {
+      if (
+        args.definition &&
+        nextMetadata?.reminderId &&
+        nativeReminderDeleted
+      ) {
         return this.withNativeAppleReminderId(args.definition, null);
       }
       return args.definition;
