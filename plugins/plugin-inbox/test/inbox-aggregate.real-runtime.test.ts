@@ -303,6 +303,8 @@ describe("aggregate builders", () => {
     const result = await fetchGmailMessages(source, {});
 
     expect(result.messages).toHaveLength(501);
+    expect(result.messages[0]?.channelName).toBe("Subject 0");
+    expect(toInboxMessages(result.messages)[0]?.subject).toBe("Subject 0");
   });
 
   it("normalizeInboxChannel accepts known channels case-insensitively and rejects the rest", () => {
@@ -902,6 +904,7 @@ describe("InboxDomain on a real runtime", () => {
     expect(refreshed.messages).toHaveLength(1);
     const scored = refreshed.messages[0];
     expect(scored?.channel).toBe("gmail");
+    expect(scored?.subject).toBe("Invoice due Friday");
     expect(scored?.priorityScore).toBe(90);
     expect(scored?.priorityCategory).toBe("important");
     // The scored message landed back in the cache seam.

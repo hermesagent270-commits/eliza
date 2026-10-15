@@ -671,7 +671,7 @@ export async function fetchGmailMessages(
       source: "gmail",
       senderName: from,
       senderEmail: msg.fromEmail ?? undefined,
-      channelName: `Email from ${from}`,
+      channelName: msg.subject || "(no subject)",
       channelType: "dm",
       text: msg.snippet || msg.subject || "",
       snippet: msg.snippet || msg.subject || "",
