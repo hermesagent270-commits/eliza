@@ -49,6 +49,7 @@ import { isEmailAddress } from "./gmail-message-connector.js";
 import type {
   GoogleGmailBulkOperation,
   GoogleGmailMessageSummary,
+  GoogleGmailSendResult,
   IGoogleGmailService,
 } from "./types.js";
 
@@ -104,6 +105,21 @@ function externalMessageId(messageId: string): string {
     return messageId.slice(markerIndex + marker.length);
   }
   return gmailId(messageId);
+}
+
+function requireGmailSendReceipt(
+  result: GoogleGmailSendResult,
+  operation: "message" | "reply"
+): string {
+  const externalId = result.messageId?.trim();
+  if (!externalId) {
+    throw new ElizaError(`Gmail did not return an identifier for the sent ${operation}.`, {
+      code: "MESSAGE_PROVIDER_RECEIPT_MISSING",
+      context: { source: "gmail", operation },
+      severity: "fatal",
+    });
+  }
+  return externalId;
 }
 
 function asReceivedAtMs(value: string): number {
@@ -758,7 +774,7 @@ export class GoogleGmailAdapter extends BaseMessageAdapter {
         subject: request.subject?.trim() || "",
         bodyText: request.body,
       });
-      return { externalId: sent.messageId ?? `gmail-new:${draftId}` };
+      return { externalId: requireGmailSendReceipt(sent, "message") };
     }
     const envelope = draft.replyEnvelope;
     if (!envelope)
@@ -782,9 +798,7 @@ export class GoogleGmailAdapter extends BaseMessageAdapter {
         domainEventId: `gmail_reply:${envelope.accountId}:${sent.messageId}`,
       });
     }
-    return {
-      externalId: sent.messageId ?? `gmail-reply:${envelope.externalId}`,
-    };
+    return { externalId: requireGmailSendReceipt(sent, "reply") };
   }
 
   protected async manageMessageImpl(

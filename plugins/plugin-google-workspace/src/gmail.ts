@@ -79,6 +79,21 @@ function createGmailPaginationState(): GmailPaginationState {
   return { seenPageTokens: new Set<string>() };
 }
 
+function requireGmailSendMessageId(
+  message: gmail_v1.Schema$Message,
+  operation: "message" | "reply"
+): string {
+  const messageId = message.id?.trim();
+  if (!messageId) {
+    throw new ElizaError(`Gmail did not return an identifier for the sent ${operation}.`, {
+      code: "MESSAGE_PROVIDER_RECEIPT_MISSING",
+      context: { source: "gmail", operation },
+      severity: "fatal",
+    });
+  }
+  return messageId;
+}
+
 // Both searchGmailMessages and getGmailSubscriptionHeaders loop `while
 // (results.length < limit)`, but a page with zero mapped messages (e.g. every
 // message.id was blank, or the API returned an empty page with a distinct
@@ -220,7 +235,7 @@ export class GoogleGmailClient {
     });
 
     return {
-      id: response.data.id ?? "",
+      id: requireGmailSendMessageId(response.data, "message"),
       threadId: response.data.threadId ?? undefined,
     };
   }
@@ -921,7 +936,7 @@ export class GoogleGmailClient {
       requestBody: threadId ? { raw, threadId } : { raw },
     });
     return {
-      messageId: response.data.id ?? null,
+      messageId: requireGmailSendMessageId(response.data, params.threadId ? "reply" : "message"),
       threadId: response.data.threadId ?? null,
       labelIds: response.data.labelIds ?? [],
     };
