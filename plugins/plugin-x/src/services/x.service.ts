@@ -1078,16 +1078,18 @@ export class XService extends Service {
     accountId: string,
     params: { conversationId: string; text: string },
   ): Promise<{ ok: true; status: number; messageId: string | null }> {
-    const result = await this.withDmSession(accountId, (base, session) => {
-      this.assertDmSessionCurrent(base, session);
-      return session.client.v2.sendDmInConversation(params.conversationId, {
-        text: params.text,
-      });
-    });
+    const sent = await this.withDmSession(accountId, (base, session) =>
+      this.sendXDirectMessage(
+        base,
+        session,
+        { conversationId: params.conversationId },
+        params.text,
+      ),
+    );
     return {
       ok: true,
       status: 201,
-      messageId: normalizeXReceiptId(result.dm_event_id) ?? null,
+      messageId: sent.messageId,
     };
   }
 
@@ -1419,6 +1421,9 @@ export class XService extends Service {
     to: { participantId: string } | { conversationId: string },
     text: string,
   ): Promise<{ messageId: string | null; messageIds: string[] }> {
+    if (!text.trim()) {
+      throw new Error("X DM connector requires non-empty text content.");
+    }
     const messageIds: string[] = [];
     for (const chunk of splitXDirectMessageContent(text)) {
       this.assertDmSessionCurrent(base, session);
@@ -1431,7 +1436,21 @@ export class XService extends Service {
               text: chunk,
             });
       const messageId = normalizeXReceiptId(result.dm_event_id);
-      if (messageId) messageIds.push(messageId);
+      if (!messageId) {
+        throw new ElizaError(
+          "X accepted the direct message but returned no usable receipt; do not retry blindly",
+          {
+            code: "X_DM_RECEIPT_INDETERMINATE",
+            context: {
+              accountId: base.accountId,
+              confirmedPartCount: messageIds.length,
+              providerAccepted: true,
+              retrySafe: false,
+            },
+          },
+        );
+      }
+      messageIds.push(messageId);
     }
     return { messageId: messageIds[0] ?? null, messageIds };
   }

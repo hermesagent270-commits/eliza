@@ -6,6 +6,7 @@
  * LifeOps can import it without the full plugin runtime.
  */
 import {
+  ElizaError,
   type IAgentRuntime,
   type Memory,
   toWellFormedUnicode,
@@ -264,9 +265,20 @@ export class XDmAdapter extends BaseMessageAdapter {
         }`,
       );
     }
-    return {
-      externalId: sent.messageId ?? `${participantId}:${Date.now()}`,
-    };
+    const messageId = sent.messageId?.trim();
+    if (!messageId) {
+      throw new ElizaError(
+        "X accepted the direct message but returned no usable receipt; do not retry blindly",
+        {
+          code: "X_DM_RECEIPT_INDETERMINATE",
+          context: {
+            providerAccepted: true,
+            retrySafe: false,
+          },
+        },
+      );
+    }
+    return { externalId: messageId };
   }
 
   protected scheduleSendImpl(

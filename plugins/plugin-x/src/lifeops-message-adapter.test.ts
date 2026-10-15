@@ -3,7 +3,7 @@
  * live adapter pull; the X adapter owns that scope (`channels: "implicit"`).
  */
 import type { IAgentRuntime } from "@elizaos/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { XDmAdapter } from "./lifeops-message-adapter";
 
 function dm(id: string, conversationId: string, text: string, at: number) {
@@ -41,5 +41,36 @@ describe("XDmAdapter listMessages", () => {
   it("lists every conversation without a channel scope", async () => {
     const refs = await new XDmAdapter().listMessages(runtime, {});
     expect(refs.map((ref) => ref.channelId)).toEqual(["conv-B", "conv-A"]);
+  });
+});
+
+describe("XDmAdapter sendDraft", () => {
+  it("does not mark an accepted send as delivered without a provider receipt", async () => {
+    const sendDirectMessageForAccount = vi.fn(async () => ({
+      ok: true,
+      status: 201,
+      messageId: null,
+    }));
+    const sendRuntime = {
+      agentId: "agent",
+      getService: (name: string) =>
+        name === "x" ? { sendDirectMessageForAccount } : null,
+    } as unknown as IAgentRuntime;
+    const adapter = new XDmAdapter();
+    const draft = await adapter.createDraft(sendRuntime, {
+      to: [{ identifier: "123" }],
+      body: "hello",
+    });
+
+    await expect(
+      adapter.sendDraft(sendRuntime, draft.draftId),
+    ).rejects.toMatchObject({
+      code: "X_DM_RECEIPT_INDETERMINATE",
+      context: {
+        providerAccepted: true,
+        retrySafe: false,
+      },
+    });
+    expect(sendDirectMessageForAccount).toHaveBeenCalledOnce();
   });
 });

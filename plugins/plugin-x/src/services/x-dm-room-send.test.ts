@@ -11,7 +11,12 @@ import {
 import { describe, expect, it } from "vitest";
 import { XService } from "./x.service";
 
-function harness(ownUserId: string, groupConversationIds: string[] = []) {
+function harness(
+  ownUserId: string,
+  groupConversationIds: string[] = [],
+  participantReceipt = "9001",
+  conversationReceipt = "9002",
+) {
   const dmCalls: Array<{ recipient: string; text: string }> = [];
   const conversationCalls: Array<{ conversationId: string; text: string }> = [];
   const profileLookups: string[] = [];
@@ -24,14 +29,14 @@ function harness(ownUserId: string, groupConversationIds: string[] = []) {
           body: { text: string },
         ) => {
           dmCalls.push({ recipient, text: body.text });
-          return { dm_event_id: "9001" };
+          return { dm_event_id: participantReceipt };
         },
         sendDmInConversation: async (
           conversationId: string,
           body: { text: string },
         ) => {
           conversationCalls.push({ conversationId, text: body.text });
-          return { dm_event_id: "9002" };
+          return { dm_event_id: conversationReceipt };
         },
       },
     },
@@ -73,7 +78,7 @@ function harness(ownUserId: string, groupConversationIds: string[] = []) {
       } as never,
       { text: "hello from the inbox" },
     );
-  return { dmCalls, conversationCalls, profileLookups, send };
+  return { dmCalls, conversationCalls, profileLookups, send, service };
 }
 
 describe("X DM reply to a stored DM room", () => {
@@ -102,6 +107,26 @@ describe("X DM reply to a stored DM room", () => {
     ]);
   });
 
+  it("rejects an accepted send without a provider receipt", async () => {
+    const { dmCalls, service } = harness("1000", [], "   ");
+
+    await expect(
+      service.sendDirectMessageForAccount(undefined, {
+        participantId: "2000",
+        text: "hello from the inbox",
+      }),
+    ).rejects.toMatchObject({
+      code: "X_DM_RECEIPT_INDETERMINATE",
+      context: {
+        providerAccepted: true,
+        retrySafe: false,
+      },
+    });
+    expect(dmCalls).toEqual([
+      { recipient: "2000", text: "hello from the inbox" },
+    ]);
+  });
+
   it("sends a reply to a stored group DM room into the group conversation", async () => {
     const { dmCalls, conversationCalls, send } = harness("1000", [
       "1700000000000000001",
@@ -111,6 +136,29 @@ describe("X DM reply to a stored DM room", () => {
     expect(conversationCalls).toEqual([
       {
         conversationId: "1700000000000000001",
+        text: "hello from the inbox",
+      },
+    ]);
+  });
+
+  it("rejects an accepted conversation send without a provider receipt", async () => {
+    const { conversationCalls, service } = harness("1000", [], "9001", "   ");
+
+    await expect(
+      service.sendDirectMessageToConversationForAccount("default", {
+        conversationId: "group-conversation",
+        text: "hello from the inbox",
+      }),
+    ).rejects.toMatchObject({
+      code: "X_DM_RECEIPT_INDETERMINATE",
+      context: {
+        providerAccepted: true,
+        retrySafe: false,
+      },
+    });
+    expect(conversationCalls).toEqual([
+      {
+        conversationId: "group-conversation",
         text: "hello from the inbox",
       },
     ]);
