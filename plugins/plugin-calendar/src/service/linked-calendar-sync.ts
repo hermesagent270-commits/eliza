@@ -579,9 +579,10 @@ export class GoogleLinkedCalendarProviderPort
       );
     } catch (error) {
       const status = providerErrorStatus(error);
-      // error-policy:J1 A provider 404/410 is an authoritative absent snapshot;
-      // all transport and permission failures retain their error outcome.
-      if (status === 404 || status === 410) return null;
+      // error-policy:J1 A provider 410 is an authoritative absent snapshot.
+      // A 404 can also mean the calendar is missing or inaccessible, so it
+      // must remain an error instead of deleting the linked local event.
+      if (status === 410) return null;
       throw error;
     }
   }

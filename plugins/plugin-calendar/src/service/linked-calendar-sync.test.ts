@@ -1200,16 +1200,27 @@ describe("GoogleLinkedCalendarProviderPort", () => {
     expect(updated.event.recurrence).toEqual(["RRULE:FREQ=WEEKLY"]);
   });
 
-  it("maps provider 410 to an absent snapshot for watch/full-resync reconciliation", async () => {
-    const google = {
+  it("maps provider 410, but not ambiguous 404, to an absent snapshot", async () => {
+    const deleted = {
       async getEvent() {
         throw { status: 410 };
       },
     } as unknown as IGoogleWorkspaceService;
-    const port = new GoogleLinkedCalendarProviderPort(google);
+    const port = new GoogleLinkedCalendarProviderPort(deleted);
     await expect(
       port.get(record({ providerEventId: "deleted-google-event" })),
     ).resolves.toBeNull();
+
+    const inaccessible = {
+      async getEvent() {
+        throw { response: { status: 404 }, message: "Calendar not found" };
+      },
+    } as unknown as IGoogleWorkspaceService;
+    await expect(
+      new GoogleLinkedCalendarProviderPort(inaccessible).get(
+        record({ providerEventId: "inaccessible-google-event" }),
+      ),
+    ).rejects.toMatchObject({ response: { status: 404 } });
   });
 });
 
