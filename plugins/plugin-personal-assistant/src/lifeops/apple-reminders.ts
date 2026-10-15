@@ -377,11 +377,20 @@ export async function createNativeAppleReminderLikeItem(args: {
     }),
   );
   if (payload.ok) {
+    const reminderId = payload.reminderId?.trim();
+    if (!reminderId) {
+      return {
+        ok: false,
+        reason: "native_error",
+        message:
+          "Native Apple Reminders bridge did not return the created reminder id.",
+      };
+    }
     return {
       ok: true,
       data: {
         provider: "apple_reminders",
-        reminderId: payload.reminderId || null,
+        reminderId,
       },
     };
   }
