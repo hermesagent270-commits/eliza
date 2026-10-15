@@ -68,6 +68,7 @@ type RuntimeIMessageServiceLike = {
     success: boolean;
     messageId?: string;
     messageIds?: string[];
+    localEffectIds?: string[];
     chatId?: string;
     error?: string;
   }>;
@@ -93,6 +94,13 @@ export interface IMessageSendRequest {
   attachmentPaths?: string[];
   transport?: "auto" | "native";
   expectedAccount?: { identityId: string; transport: string };
+}
+
+export interface IMessageSendReceipt {
+  ok: true;
+  messageId?: string;
+  messageIds?: string[];
+  localEffectIds?: string[];
 }
 
 export interface IMessageRecord {
@@ -425,9 +433,7 @@ export class IMessageDomain {
       : unavailableIMessageStatus(checkedAt);
   }
 
-  async sendIMessage(
-    req: IMessageSendRequest,
-  ): Promise<{ ok: true; messageId?: string; messageIds?: string[] }> {
+  async sendIMessage(req: IMessageSendRequest): Promise<IMessageSendReceipt> {
     if (req.transport !== "native" && !req.expectedAccount) {
       const delegated = await sendIMessageWithRuntimeService({
         runtime: this.ctx.runtime,
@@ -436,7 +442,18 @@ export class IMessageDomain {
         mediaUrl: req.attachmentPaths?.[0],
       });
       if (delegated.status === "handled") {
-        return { ok: true, messageId: delegated.value.messageId };
+        return {
+          ok: true,
+          ...(delegated.value.messageId
+            ? { messageId: delegated.value.messageId }
+            : {}),
+          ...(delegated.value.messageIds
+            ? { messageIds: delegated.value.messageIds }
+            : {}),
+          ...(delegated.value.localEffectIds
+            ? { localEffectIds: delegated.value.localEffectIds }
+            : {}),
+        };
       }
       if (delegated.error) {
         this.ctx.logLifeOpsWarn(
@@ -480,14 +497,17 @@ export class IMessageDomain {
       }),
     );
     if (!result.success) {
-      if (result.messageIds?.length) {
+      if (result.messageIds?.length || result.localEffectIds?.length) {
         throw new ConnectorDeliveryEvidenceError(
           "iMessage accepted part of the send; reconcile before sending again.",
           {
             provider: "imessage",
             channelId: req.to,
             deliveryStatus: "partial",
-            messageIds: result.messageIds,
+            ...(result.messageIds ? { messageIds: result.messageIds } : {}),
+            ...(result.localEffectIds
+              ? { localEffectIds: result.localEffectIds }
+              : {}),
           },
         );
       }
@@ -497,6 +517,9 @@ export class IMessageDomain {
       ok: true,
       messageId: result.messageId,
       ...(result.messageIds ? { messageIds: result.messageIds } : {}),
+      ...(result.localEffectIds
+        ? { localEffectIds: result.localEffectIds }
+        : {}),
     };
   }
 

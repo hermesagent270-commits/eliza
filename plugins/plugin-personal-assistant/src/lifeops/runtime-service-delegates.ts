@@ -1019,6 +1019,8 @@ type IMessageRuntimeServiceLike = ConnectorMessageRuntimeServiceLike & {
   ) => Promise<{
     success: boolean;
     messageId?: string;
+    messageIds?: string[];
+    localEffectIds?: string[];
     chatId?: string;
     error?: string;
   }>;
@@ -1042,6 +1044,8 @@ export async function sendIMessageWithRuntimeService(args: {
   RuntimeServiceDelegationResult<{
     success: boolean;
     messageId?: string;
+    messageIds?: string[];
+    localEffectIds?: string[];
     chatId?: string;
   }>
 > {
