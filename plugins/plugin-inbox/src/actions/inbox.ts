@@ -770,7 +770,8 @@ async function replyToEntry(args: {
   const sent = await service.sendDraft(args.runtime, draft.draftId);
   await args.repo.markResolved(args.entry.id, {
     draftResponse: args.body,
-    autoReplied: true,
+    // Both route and turn sends require an explicit owner confirmation.
+    autoReplied: false,
   });
   return {
     success: true,

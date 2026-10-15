@@ -24,6 +24,11 @@ import {
   type RouteHandlerContext,
   type RouteHandlerResult,
 } from "@elizaos/host/protocol";
+import {
+  __resetDefaultTriageServiceForTests,
+  BaseMessageAdapter,
+  getDefaultTriageService,
+} from "@elizaos/plugin-assistant";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createRealTestRuntime,
@@ -94,6 +99,26 @@ function inbound(
     ...overrides,
   };
 }
+
+class ConfirmedReplyAdapter extends BaseMessageAdapter {
+  readonly source = "discord" as const;
+
+  isAvailable(): boolean {
+    return true;
+  }
+
+  protected override async createDraftImpl() {
+    return {
+      draftId: "confirmed-reply-draft",
+      preview: "Confirmed reply",
+    };
+  }
+
+  protected override async sendDraftImpl() {
+    return { externalId: "confirmed-reply-external" };
+  }
+}
+
 describe("inbox routes e2e — real plugin on real PGLite runtime", () => {
   let runtime: AgentRuntime;
   let testResult: RealTestRuntimeResult;
@@ -161,9 +186,12 @@ describe("inbox routes e2e — real plugin on real PGLite runtime", () => {
       100,
     );
     repo = new InboxRepository(runtime);
+    __resetDefaultTriageServiceForTests();
+    getDefaultTriageService().register(new ConfirmedReplyAdapter());
   }, 120000);
   afterAll(async () => {
     await testResult?.cleanup();
+    __resetDefaultTriageServiceForTests();
   });
   it("standalone plugin-inbox registers INBOX plus the promoted INBOX_* virtuals and both providers", () => {
     const actionNames = new Set(runtime.actions.map((action) => action.name));
@@ -436,6 +464,36 @@ describe("inbox routes e2e — real plugin on real PGLite runtime", () => {
         ).error,
       ),
     ).toContain("reply body is required");
+  });
+  it("records an owner-confirmed reply as manual", async () => {
+    const entry = await repo.storeTriage({
+      source: "discord",
+      sourceRoomId: "confirmed-reply-room",
+      sourceEntityId: "confirmed-reply-sender",
+      sourceMessageId: "confirmed-reply-message",
+      channelName: "confirmed-reply-channel",
+      channelType: "dm",
+      classification: "needs_reply",
+      urgency: "medium",
+      confidence: 1,
+      snippet: "Can you confirm?",
+      senderName: "Confirmed Sender",
+    });
+
+    const reply = await call("POST", `/api/lifeops/inbox/${entry.id}/reply`, {
+      params: { id: entry.id },
+      body: { body: "Confirmed.", confirmed: true },
+    });
+
+    expect(reply.status).toBe(200);
+    expect(await repo.getById(entry.id)).toMatchObject({
+      resolved: true,
+      draftResponse: "Confirmed.",
+      autoReplied: false,
+    });
+    expect(
+      (await repo.getRecentAutoReplies()).map((item) => item.id),
+    ).not.toContain(entry.id);
   });
   it("re-triaging the same source message ids dedupes instead of duplicating rows", async () => {
     const before = await repo.getUnresolved({ limit: 50 });
