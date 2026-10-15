@@ -793,3 +793,34 @@ test("a dispute takes back the affiliate fee and a won dispute returns it", asyn
   ).toBe("ack");
   expect(await affiliatePayable(lost.affiliate)).toBe(0);
 });
+
+test("overlapping full refund and lost dispute reverse an affiliate fee only once", async () => {
+  const disputeFirst = await affiliateTopUp();
+  expect(
+    await processStripeEvent(
+      disputeEvent(
+        "charge.dispute.funds_withdrawn",
+        `dp_${randomUUID()}`,
+        1500,
+        disputeFirst.paymentIntentId,
+      ),
+    ),
+  ).toBe("ack");
+  expect(await affiliatePayable(disputeFirst.affiliate)).toBe(0);
+  expect(
+    await processStripeEvent(
+      refundEvent(`ch_${randomUUID()}`, 1500, disputeFirst.paymentIntentId),
+    ),
+  ).toBe("ack");
+  expect(await affiliatePayable(disputeFirst.affiliate)).toBe(0);
+
+  const refundFirst = await affiliateTopUp();
+  expect(
+    await processStripeEvent(
+      refundEvent(`ch_${randomUUID()}`, 750, refundFirst.paymentIntentId),
+    ),
+  ).toBe("ack");
+  expect(await affiliatePayable(refundFirst.affiliate)).toBe(1.5);
+  await disputeRoundTrip(refundFirst, `dp_${randomUUID()}`, 1500);
+  expect(await affiliatePayable(refundFirst.affiliate)).toBe(1.5);
+});

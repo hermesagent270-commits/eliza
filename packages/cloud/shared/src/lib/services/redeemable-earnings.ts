@@ -795,7 +795,7 @@ class RedeemableEarningsService {
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtext(${`redeemable_earnings:${earning.userId}`}))`,
       );
-      const taken = await this.sumAffiliateFeeReversal(tx, earning.userId, reversalSeries);
+      const taken = await this.sumAffiliateFeeReversal(tx, earning.userId, paymentIntentId);
       const delta = target.minus(taken);
       if (delta.lte(0)) return 0;
       const result = await this.reduceEarnings({
@@ -826,27 +826,37 @@ class RedeemableEarningsService {
   }): Promise<number> {
     const earning = await this.findAutoTopUpAffiliateEarning(params.paymentIntentId);
     if (!earning) return 0;
-    const taken = await this.sumAffiliateFeeReversal(
-      dbWrite,
-      earning.userId,
-      params.reversalSeries,
-    );
-    if (taken.lte(0)) return 0;
-    const result = await this.addEarnings({
-      userId: earning.userId,
-      amount: taken.toNumber(),
-      source: "affiliate",
-      sourceId: `affiliate_reinstated:${params.reinstatementKey}`,
-      dedupeBySourceId: true,
-      description: `Auto top-up affiliate fee reinstated — ${params.reinstatementKey}`,
-      metadata: { payment_intent_id: params.paymentIntentId },
-    });
-    if (!result.success) {
-      throw new Error(
-        `Failed to reinstate affiliate fee for ${params.paymentIntentId}: ${result.error}`,
+    return await dbWrite.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${`redeemable_earnings:${earning.userId}`}))`,
       );
-    }
-    return taken.toNumber();
+      const taken = await this.sumAffiliateFeeReversalForSeries(
+        tx,
+        earning.userId,
+        params.paymentIntentId,
+        params.reversalSeries,
+      );
+      if (taken.lte(0)) return 0;
+      const result = await this.addEarnings({
+        userId: earning.userId,
+        amount: taken.toNumber(),
+        source: "affiliate",
+        sourceId: `affiliate_reinstated:${params.reinstatementKey}`,
+        dedupeBySourceId: true,
+        description: `Auto top-up affiliate fee reinstated — ${params.reinstatementKey}`,
+        metadata: {
+          payment_intent_id: params.paymentIntentId,
+          affiliate_reversal_series: params.reversalSeries,
+        },
+        transaction: tx,
+      });
+      if (!result.success) {
+        throw new Error(
+          `Failed to reinstate affiliate fee for ${params.paymentIntentId}: ${result.error}`,
+        );
+      }
+      return taken.toNumber();
+    });
   }
 
   private async findAutoTopUpAffiliateEarning(
@@ -870,6 +880,38 @@ class RedeemableEarningsService {
   private async sumAffiliateFeeReversal(
     db: DbTransaction | typeof dbWrite,
     userId: string,
+    paymentIntentId: string,
+  ): Promise<Decimal> {
+    const [row] = await db
+      .select({
+        reversed: sql<string>`COALESCE(SUM(CASE
+          WHEN ${redeemableEarningsLedger.entry_type} = 'adjustment'
+            AND ${redeemableEarningsLedger.metadata}->>'affiliate_reversal_series' IS NOT NULL
+          THEN -${redeemableEarningsLedger.amount}
+          ELSE 0
+        END), 0)::text`,
+        reinstated: sql<string>`COALESCE(SUM(CASE
+          WHEN ${redeemableEarningsLedger.entry_type} = 'earning'
+            AND ${redeemableEarningsLedger.metadata}->>'original_source_id' LIKE 'affiliate_reinstated:%'
+          THEN ${redeemableEarningsLedger.amount}
+          ELSE 0
+        END), 0)::text`,
+      })
+      .from(redeemableEarningsLedger)
+      .where(
+        and(
+          eq(redeemableEarningsLedger.user_id, userId),
+          eq(redeemableEarningsLedger.earnings_source, "affiliate"),
+          sql`${redeemableEarningsLedger.metadata}->>'payment_intent_id' = ${paymentIntentId}`,
+        ),
+      );
+    return Decimal.max(new Decimal(row?.reversed ?? "0").minus(row?.reinstated ?? "0"), 0);
+  }
+
+  private async sumAffiliateFeeReversalForSeries(
+    db: DbTransaction | typeof dbWrite,
+    userId: string,
+    paymentIntentId: string,
     reversalSeries: string,
   ): Promise<Decimal> {
     const [row] = await db
@@ -880,6 +922,7 @@ class RedeemableEarningsService {
           eq(redeemableEarningsLedger.user_id, userId),
           eq(redeemableEarningsLedger.entry_type, "adjustment"),
           eq(redeemableEarningsLedger.earnings_source, "affiliate"),
+          sql`${redeemableEarningsLedger.metadata}->>'payment_intent_id' = ${paymentIntentId}`,
           sql`${redeemableEarningsLedger.metadata}->>'affiliate_reversal_series' = ${reversalSeries}`,
         ),
       );
