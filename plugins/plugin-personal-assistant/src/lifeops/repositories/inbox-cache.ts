@@ -175,7 +175,7 @@ export class InboxCacheRepository {
             .join(", ")})`
         : "";
     const gmailAccountClause = options?.gmailAccountId
-      ? `AND gmail_account_id = ${sqlQuote(options.gmailAccountId)}`
+      ? `AND (channel <> ${sqlQuote("gmail")} OR gmail_account_id = ${sqlQuote(options.gmailAccountId)})`
       : "";
     const limit =
       options?.maxResults !== undefined && Number.isFinite(options.maxResults)

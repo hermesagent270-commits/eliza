@@ -58,6 +58,33 @@ function providerMessage() {
   };
 }
 
+function inboxMessage(accountId: string) {
+  return {
+    id: "gmail:same-provider-message-id",
+    channel: "gmail" as const,
+    sender: {
+      id: "same-provider-message-id",
+      displayName: "Fixture sender",
+      email: "sender@example.test",
+      avatarUrl: null,
+    },
+    subject: "Account-isolated inbox message",
+    snippet: "Fixture preview",
+    receivedAt: SYNCED_AT,
+    unread: true,
+    deepLink: null,
+    sourceRef: {
+      channel: "gmail" as const,
+      externalId: "same-provider-message-id",
+    },
+    threadId: "same-provider-thread-id",
+    chatType: "dm" as const,
+    gmailAccountId: `connector-account:${accountId}`,
+    gmailAccountEmail: `${accountId}@example.test`,
+    connectorAccountId: accountId,
+  };
+}
+
 describe("LifeOpsRepository Gmail account isolation", () => {
   let runtimeResult: RealTestRuntimeResult | null = null;
 
@@ -183,31 +210,6 @@ describe("LifeOpsRepository Gmail account isolation", () => {
     const { runtime } = runtimeResult;
     await LifeOpsRepository.bootstrapSchema(runtime);
     const repository = new LifeOpsRepository(runtime);
-    const inboxMessage = (accountId: string) => ({
-      id: "gmail:same-provider-message-id",
-      channel: "gmail" as const,
-      sender: {
-        id: "same-provider-message-id",
-        displayName: "Fixture sender",
-        email: "sender@example.test",
-        avatarUrl: null,
-      },
-      subject: "Account-isolated inbox message",
-      snippet: "Fixture preview",
-      receivedAt: SYNCED_AT,
-      unread: true,
-      deepLink: null,
-      sourceRef: {
-        channel: "gmail" as const,
-        externalId: "same-provider-message-id",
-      },
-      threadId: "same-provider-thread-id",
-      chatType: "dm" as const,
-      gmailAccountId: `connector-account:${accountId}`,
-      gmailAccountEmail: `${accountId}@example.test`,
-      connectorAccountId: accountId,
-    });
-
     await repository.upsertCachedInboxMessages(runtime.agentId, [
       inboxMessage("account-1"),
       inboxMessage("account-2"),
@@ -222,6 +224,54 @@ describe("LifeOpsRepository Gmail account isolation", () => {
       "same-provider-message-id",
       "same-provider-message-id",
     ]);
+  });
+
+  it("keeps non-Gmail channels when one Gmail grant is selected", async () => {
+    runtimeResult = await createLifeOpsTestRuntime();
+    const { runtime } = runtimeResult;
+    await LifeOpsRepository.bootstrapSchema(runtime);
+    const repository = new LifeOpsRepository(runtime);
+    const discordMessage = {
+      id: "discord:message-1",
+      channel: "discord" as const,
+      sender: {
+        id: "discord-sender",
+        displayName: "Discord sender",
+        email: null,
+        avatarUrl: null,
+      },
+      subject: null,
+      snippet: "Discord preview",
+      receivedAt: SYNCED_AT,
+      unread: true,
+      deepLink: null,
+      sourceRef: {
+        channel: "discord" as const,
+        externalId: "message-1",
+      },
+      threadId: "discord-thread",
+      chatType: "dm" as const,
+      gmailAccountId: null,
+      gmailAccountEmail: null,
+      connectorAccountId: null,
+    };
+
+    await repository.upsertCachedInboxMessages(runtime.agentId, [
+      inboxMessage("account-1"),
+      inboxMessage("account-2"),
+      discordMessage,
+    ]);
+
+    const messages = await repository.listCachedInboxMessages(runtime.agentId, {
+      channels: ["gmail", "discord"],
+      gmailAccountId: "connector-account:account-1",
+    });
+    expect(new Set(messages.map((message) => message.channel))).toEqual(
+      new Set(["gmail", "discord"]),
+    );
+    expect(
+      messages.find((message) => message.channel === "gmail")?.gmailAccountId,
+    ).toBe("connector-account:account-1");
   });
 
   it("rolls back the prior projection and cursor when seed publication fails", async () => {
