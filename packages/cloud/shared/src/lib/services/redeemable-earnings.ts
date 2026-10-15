@@ -767,8 +767,9 @@ class RedeemableEarningsService {
    * the charge succeeded; without this a refunded or disputed charge still
    * paid the affiliate. `reversedCents` is cumulative for `reversalSeries`
    * (the same series the credit clawback uses), so only the part not taken
-   * back yet is debited. An already paid-out fee leaves a negative ledger sum
-   * that later affiliate earnings net against.
+   * back yet is debited. The final delta is capped across every reversal
+   * series for the payment intent. An already paid-out fee leaves a negative
+   * ledger sum that later affiliate earnings net against.
    */
   async reverseAutoTopUpAffiliateFee(params: {
     paymentIntentId: string;
@@ -795,7 +796,11 @@ class RedeemableEarningsService {
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtext(${`redeemable_earnings:${earning.userId}`}))`,
       );
-      const taken = await this.sumAffiliateFeeReversal(tx, earning.userId, paymentIntentId);
+      const taken = await this.sumAffiliateFeeReversalAcrossPayment(
+        tx,
+        earning.userId,
+        paymentIntentId,
+      );
       const delta = target.minus(taken);
       if (delta.lte(0)) return 0;
       const result = await this.reduceEarnings({
@@ -877,7 +882,7 @@ class RedeemableEarningsService {
     return row ?? null;
   }
 
-  private async sumAffiliateFeeReversal(
+  private async sumAffiliateFeeReversalAcrossPayment(
     db: DbTransaction | typeof dbWrite,
     userId: string,
     paymentIntentId: string,
