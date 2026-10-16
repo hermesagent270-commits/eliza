@@ -67,6 +67,7 @@ type TelegramPluginServiceLike = {
   messageManager?: unknown;
   connected?: boolean;
   isServiceConnected?: () => boolean;
+  getPollerHealth?: () => { connected?: boolean } | null;
   handleSendMessage?: unknown;
   searchConnectorMessages?: unknown;
   bot?: {
@@ -92,13 +93,19 @@ function getTelegramPluginService(
 function telegramPluginConnected(
   service: TelegramPluginServiceLike | null,
 ): boolean {
-  return Boolean(
-    service?.messageManager ||
-      service?.connected === true ||
-      service?.isServiceConnected?.() === true ||
-      telegramPluginCanRead(service) ||
-      telegramPluginCanSend(service),
-  );
+  if (!service) return false;
+  try {
+    if (typeof service.getPollerHealth === "function") {
+      return service.getPollerHealth()?.connected === true;
+    }
+    if (typeof service.isServiceConnected === "function") {
+      return service.isServiceConnected() === true;
+    }
+  } catch {
+    return false;
+  }
+  if (typeof service.connected === "boolean") return service.connected;
+  return Boolean(service.messageManager);
 }
 
 function telegramPluginCanRead(

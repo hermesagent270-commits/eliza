@@ -11,8 +11,10 @@ import {
   InMemoryConnectorAccountStorage,
   validateToolArgs,
 } from "@elizaos/core";
+import { TelegramService } from "@elizaos/plugin-telegram";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGoogleConnectorAccountProvider } from "../../../plugin-google-workspace/src/connector-account-provider.js";
+import { LifeOpsService } from "../lifeops/service.js";
 import { connectorAction } from "./connector.js";
 
 vi.mock("@elizaos/plugin-assistant", async (importOriginal) => ({
@@ -194,5 +196,25 @@ describe("CONNECTOR Google capability selection", () => {
     const google = await disconnect("google");
     expect(google.success).toBe(false);
     expect(google.data.requiresConfirmation).toBe(true);
+  });
+});
+
+describe("Telegram runtime status", () => {
+  it("does not grant capabilities or send when the transport reports that it is disconnected", async () => {
+    const transport = new TelegramService(runtime);
+    const handleSendMessage = vi.spyOn(transport, "handleSendMessage");
+    vi.spyOn(runtime, "getService").mockImplementation((serviceType) =>
+      serviceType === "telegram" ? (transport as never) : null,
+    );
+    const service = new LifeOpsService(runtime);
+
+    await expect(service.getTelegramConnectorStatus()).resolves.toMatchObject({
+      connected: false,
+      grantedCapabilities: [],
+    });
+    await expect(
+      service.sendTelegramMessage({ target: "123", message: "Hello" }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(handleSendMessage).not.toHaveBeenCalled();
   });
 });
