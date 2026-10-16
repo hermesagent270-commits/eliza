@@ -670,6 +670,7 @@ export const notesAction: Action = {
       const removed = await service.deleteNoteByLookupWithCommit(
         "query",
         target,
+        { requireTitleInText: readString(message.content.text) },
       );
       return committed({
         op,

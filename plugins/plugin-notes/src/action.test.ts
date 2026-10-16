@@ -289,6 +289,32 @@ describe("promoted Notes execution", () => {
     );
   });
 
+  it("does not delete a note whose title the owner did not name", async () => {
+    const runtime = await executorHarness();
+    const service = getNotesService(runtime);
+    const note = await service.createNote({
+      title: "wifi password",
+      body: "keep this exact note",
+      color: "yellow",
+    });
+
+    const result = await execute(
+      runtime,
+      {
+        name: "NOTES_DELETE",
+        params: { content: "wifi password" },
+      },
+      ["OWNER"],
+      "Delete the wifi credentials note.",
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      data: { error: { code: "NOTES_DELETE_NAME_MISMATCH" } },
+    });
+    expect(service.getNote(note.id)).toEqual(note);
+  });
+
   it.each([undefined, "", "  ", 7, ["Existing"], { title: "Existing" }])(
     "rejects invalid legacy update selector %j without writes",
     async (selector) => {
@@ -337,10 +363,15 @@ describe("promoted Notes execution", () => {
         { title: "Exact label", body: "\nChanged body." },
       ]);
       expect(
-        await execute(runtime, {
-          name: "NOTES_DELETE",
-          params: { [name]: "Exact label" },
-        }),
+        await execute(
+          runtime,
+          {
+            name: "NOTES_DELETE",
+            params: { [name]: "Exact label" },
+          },
+          ["OWNER"],
+          "Delete the Exact label note.",
+        ),
       ).toMatchObject({ success: true });
       expect(getNotesService(runtime).listNotes()).toEqual([]);
     },
@@ -1084,10 +1115,15 @@ describe("promoted Notes execution", () => {
       },
     ]);
     expect(listed.data?.filterApplied).toBe(false);
-    const deleted = await execute(runtime, {
-      name: "NOTES_DELETE",
-      params: { content: "Conversation context QA" },
-    });
+    const deleted = await execute(
+      runtime,
+      {
+        name: "NOTES_DELETE",
+        params: { content: "Conversation context QA" },
+      },
+      ["OWNER"],
+      "Delete the Conversation context QA note.",
+    );
     expect(deleted.success).toBe(true);
     expect(deleted.data?.note).toEqual(updated.data?.note);
     expect((await run(runtime, { action: "list" })).data?.notes).toEqual([]);
