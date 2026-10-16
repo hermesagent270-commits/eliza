@@ -74,6 +74,7 @@ function snowflakeBefore(sinceMs: number): string | undefined {
  * stale service shape.
  */
 interface DiscordTriageCapableService {
+	isHealthy?(): boolean;
 	fetchConnectorMessages(
 		context: MessageConnectorQueryContext,
 		params: DiscordConnectorFetchParams,
@@ -106,11 +107,17 @@ function getDiscordTriageService(
 	runtime: IAgentRuntime,
 ): DiscordTriageCapableService | null {
 	const service = runtime.getService(DISCORD_SERVICE_NAME);
-	return service &&
-		typeof service === "object" &&
-		isDiscordTriageService(service)
-		? service
-		: null;
+	if (
+		!service ||
+		typeof service !== "object" ||
+		!isDiscordTriageService(service)
+	) {
+		return null;
+	}
+	if (typeof service.isHealthy === "function" && !service.isHealthy()) {
+		return null;
+	}
+	return service;
 }
 
 function metaString(

@@ -231,6 +231,17 @@ describe("DiscordTriageAdapter", () => {
 		expect(adapter.isAvailable(createRuntime({ notTheApi: true }))).toBe(false);
 	});
 
+	it("is unavailable while the registered Discord service is disconnected", () => {
+		const service = {
+			...createFakeDiscordService(),
+			isHealthy: () => false,
+		};
+
+		expect(new DiscordTriageAdapter().isAvailable(createRuntime(service))).toBe(
+			false,
+		);
+	});
+
 	it("advertises list capability so triage sweeps engage", () => {
 		const caps = new DiscordTriageAdapter().capabilities();
 		expect(caps.list).toBe(true);
