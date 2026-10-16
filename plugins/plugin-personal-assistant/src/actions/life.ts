@@ -987,11 +987,18 @@ type DefinitionResult = {
 async function listCallerDefinitions(
   service: LifeOpsService,
   domain?: LifeOpsDomain,
+  surface?: OwnerDefinitionSurface | null,
 ): Promise<LifeOpsDefinitionRecord[]> {
   const agentId = service.agentId();
   const ownerEntityId = service.ownerEntityId();
   return (await service.listDefinitions()).filter((entry) => {
     if (domain && entry.definition.domain !== domain) return false;
+    if (
+      surface &&
+      resolveOwnerDefinitionSurface(entry.definition) !== surface
+    ) {
+      return false;
+    }
     const expectedSubjectId =
       entry.definition.subjectType === "agent" ? agentId : ownerEntityId;
     return entry.definition.subjectId === expectedSubjectId;
@@ -1149,12 +1156,11 @@ async function resolveEnumeratedDeleteTargets(
   service: LifeOpsService,
   ownerText: string,
   domain?: LifeOpsDomain,
+  surface?: OwnerDefinitionSurface | null,
 ): Promise<LifeOpsDefinitionRecord[]> {
   const normalizedOwner = normalizeTitle(ownerText);
   if (!normalizedOwner) return [];
-  const defs = (await service.listDefinitions()).filter((entry) =>
-    domain ? entry.definition.domain === domain : true,
-  );
+  const defs = await listCallerDefinitions(service, domain, surface);
   const byTitle = new Map<string, LifeOpsDefinitionRecord[]>();
   for (const entry of defs) {
     const key = normalizeTitle(entry.definition.title);
@@ -1181,9 +1187,10 @@ async function resolveDefinitionForMutation(
   target: string | undefined,
   ownerText: string,
   domain?: LifeOpsDomain,
+  surface?: OwnerDefinitionSurface | null,
   destructive = false,
 ): Promise<DefinitionResult> {
-  const allDefinitions = await listCallerDefinitions(service, domain);
+  const allDefinitions = await listCallerDefinitions(service, domain, surface);
   const normalizedOwnerText = normalizeTitle(ownerText);
   // Exclusions apply to every matching path, including exact IDs and fuzzy
   // fallbacks. A later heuristic must not reintroduce a protected item.
@@ -1422,15 +1429,28 @@ async function resolveOccurrence(
   service: LifeOpsService,
   target: string | undefined,
   domain?: LifeOpsDomain,
+  surface?: OwnerDefinitionSurface | null,
 ): Promise<OccurrenceResult> {
   if (!target) return { match: null, ambiguousCandidates: [] };
+  const surfaceDefinitionIds = surface
+    ? new Set(
+        (await listCallerDefinitions(service, domain, surface)).map(
+          (entry) => entry.definition.id,
+        ),
+      )
+    : null;
   if (validateUuid(target)) {
     const occurrence = await getCallerOccurrenceView(
       service.repository,
       service,
       target,
     );
-    if (occurrence && (!domain || occurrence.domain === domain)) {
+    if (
+      occurrence &&
+      (!domain || occurrence.domain === domain) &&
+      (!surfaceDefinitionIds ||
+        surfaceDefinitionIds.has(occurrence.definitionId))
+    ) {
       return { match: occurrence, ambiguousCandidates: [] };
     }
     const definition = await getCallerDefinition(
@@ -1444,7 +1464,8 @@ async function resolveOccurrence(
     if (
       definition?.status !== "active" ||
       definition.cadence.kind !== "once" ||
-      (domain && definition.domain !== domain)
+      (domain && definition.domain !== domain) ||
+      (surfaceDefinitionIds && !surfaceDefinitionIds.has(definition.id))
     ) {
       return { match: null, ambiguousCandidates: [] };
     }
@@ -1474,7 +1495,11 @@ async function resolveOccurrence(
   const all = [
     ...overview.owner.occurrences,
     ...overview.agentOps.occurrences,
-  ].filter((o) => (domain ? o.domain === domain : true));
+  ].filter(
+    (o) =>
+      (!domain || o.domain === domain) &&
+      (!surfaceDefinitionIds || surfaceDefinitionIds.has(o.definitionId)),
+  );
   const normalized = normalizeTitle(target);
 
   // Exact ID match
@@ -1615,6 +1640,7 @@ async function resolveOccurrenceWithIntentFallback(args: {
   service: LifeOpsService;
   target: string | undefined;
   domain?: LifeOpsDomain;
+  surface?: OwnerDefinitionSurface | null;
   intent: string;
   operation: LifeOperation;
 }): Promise<OccurrenceResult> {
@@ -1622,6 +1648,7 @@ async function resolveOccurrenceWithIntentFallback(args: {
     args.service,
     args.target,
     args.domain,
+    args.surface,
   );
   if (
     direct.match ||
@@ -1643,7 +1670,12 @@ async function resolveOccurrenceWithIntentFallback(args: {
     return direct;
   }
 
-  return resolveOccurrence(args.service, fallbackTarget, args.domain);
+  return resolveOccurrence(
+    args.service,
+    fallbackTarget,
+    args.domain,
+    args.surface,
+  );
 }
 
 function explicitCadenceTimeZone(
@@ -4346,6 +4378,9 @@ async function runLifeOperationHandlerInner(
   options: HandlerOptions | undefined,
 ): Promise<PendingLifeActionResult> {
   const ownerSurfaceActionName = ownerSurfaceActionNameFromOptions(options);
+  const expectedDefinitionSurface = ownerDefinitionSurface(
+    ownerSurfaceActionName,
+  );
   const currentRequestIntents = readTaskExtractionRequestIntents(
     state,
     message,
@@ -6075,6 +6110,7 @@ async function runLifeOperationHandlerInner(
           targetName,
           messageText(message) || intent,
           domain,
+          expectedDefinitionSurface,
         );
       if (!target)
         return {
@@ -6435,6 +6471,7 @@ async function runLifeOperationHandlerInner(
             service,
             messageText(message) || intent,
             domain,
+            expectedDefinitionSurface,
           );
       if (enumeratedTargets.length > 1) {
         for (const entry of enumeratedTargets) {
@@ -6485,6 +6522,7 @@ async function runLifeOperationHandlerInner(
           targetName,
           messageText(message) || intent,
           domain,
+          expectedDefinitionSurface,
           // Destructive: a fuzzy near-miss must ask, never delete (the
           // wrong-item deletion guard — sibling of TRIGGER_REF_MISMATCH).
           true,
@@ -6627,6 +6665,7 @@ async function runLifeOperationHandlerInner(
           targetName,
           messageText(message) || intent,
           domain,
+          expectedDefinitionSurface,
         );
       if (ambiguousCandidates.length > 0)
         return {
@@ -6658,35 +6697,35 @@ async function runLifeOperationHandlerInner(
     }
 
     if (internalOp === "complete_occurrence") {
-      // Direct occurrenceId path: when the planner already knows the
-      // occurrence id we skip title/intent matching.
       const directOccurrenceId = detailString(details, "occurrenceId");
-      let resolvedTargetId: string;
-      if (directOccurrenceId) {
-        resolvedTargetId = directOccurrenceId;
-      } else {
-        const { match: target, ambiguousCandidates } =
-          await resolveOccurrenceWithIntentFallback({
+      const { match: target, ambiguousCandidates } = directOccurrenceId
+        ? await resolveOccurrence(
+            service,
+            directOccurrenceId,
+            domain,
+            expectedDefinitionSurface,
+          )
+        : await resolveOccurrenceWithIntentFallback({
             service,
             target: targetName,
             domain,
+            surface: expectedDefinitionSurface,
             intent,
             operation,
           });
-        if (!target) {
-          if (ambiguousCandidates.length > 0) {
-            return {
-              success: false,
-              text: `Multiple items match — which one?\n${ambiguousCandidates.map((t) => `  - ${t}`).join("\n")}`,
-            };
-          }
+      if (!target) {
+        if (ambiguousCandidates.length > 0) {
           return {
             success: false,
-            text: "I could not find that active item to complete.",
+            text: `Multiple items match — which one?\n${ambiguousCandidates.map((t) => `  - ${t}`).join("\n")}`,
           };
         }
-        resolvedTargetId = target.id;
+        return {
+          success: false,
+          text: "I could not find that active item to complete.",
+        };
       }
+      const resolvedTargetId = target.id;
       const priorOccurrence = await service.repository.getOccurrence(
         runtime.agentId,
         resolvedTargetId,
@@ -6769,6 +6808,7 @@ async function runLifeOperationHandlerInner(
           service,
           target: targetName,
           domain,
+          surface: expectedDefinitionSurface,
           intent,
           operation,
         });
@@ -6809,34 +6849,35 @@ async function runLifeOperationHandlerInner(
     }
 
     if (internalOp === "snooze_occurrence") {
-      // Direct occurrenceId path for reminder_snooze.
       const directOccurrenceId = detailString(details, "occurrenceId");
-      let resolvedTargetId: string;
-      if (directOccurrenceId) {
-        resolvedTargetId = directOccurrenceId;
-      } else {
-        const { match: target, ambiguousCandidates } =
-          await resolveOccurrenceWithIntentFallback({
+      const { match: target, ambiguousCandidates } = directOccurrenceId
+        ? await resolveOccurrence(
+            service,
+            directOccurrenceId,
+            domain,
+            expectedDefinitionSurface,
+          )
+        : await resolveOccurrenceWithIntentFallback({
             service,
             target: targetName,
             domain,
+            surface: expectedDefinitionSurface,
             intent,
             operation,
           });
-        if (!target) {
-          if (ambiguousCandidates.length > 0) {
-            return {
-              success: false,
-              text: `Multiple items match — which one?\n${ambiguousCandidates.map((t) => `  - ${t}`).join("\n")}`,
-            };
-          }
+      if (!target) {
+        if (ambiguousCandidates.length > 0) {
           return {
             success: false,
-            text: "I could not find that active item to snooze.",
+            text: `Multiple items match — which one?\n${ambiguousCandidates.map((t) => `  - ${t}`).join("\n")}`,
           };
         }
-        resolvedTargetId = target.id;
+        return {
+          success: false,
+          text: "I could not find that active item to snooze.",
+        };
       }
+      const resolvedTargetId = target.id;
       const preset =
         normalizeSnoozePreset(detailString(details, "preset")) ??
         normalizeSnoozePreset(params.preset) ??

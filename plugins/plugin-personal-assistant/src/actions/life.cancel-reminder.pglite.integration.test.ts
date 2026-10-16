@@ -303,6 +303,84 @@ it.each([
   },
 );
 
+it.each(["complete", "skip", "snooze"] as const)(
+  "does not let the reminders surface %s a todo occurrence",
+  async (action) => {
+    const todo = await service.createDefinition({
+      title: `Todo protected from reminder ${action}`,
+      kind: "task",
+      timezone: "UTC",
+      cadence: {
+        kind: "once",
+        dueAt: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+      metadata: {
+        ownerSurface: "OWNER_TODOS",
+        nativeProjection: "in_app_only",
+      },
+    });
+    const [occurrence] = await service.repository.listOccurrencesForDefinition(
+      fixture.runtime.agentId,
+      todo.definition.id,
+    );
+    expect(occurrence).toBeDefined();
+
+    const result = await invoke(
+      {
+        action,
+        target: occurrence.id,
+        details: {
+          occurrenceId: occurrence.id,
+          ...(action === "snooze" ? { minutes: 10 } : {}),
+        },
+      },
+      action === "complete"
+        ? "Complete this reminder."
+        : action === "skip"
+          ? "Skip this reminder."
+          : "Snooze this reminder for 10 minutes.",
+    );
+
+    expect(result.success).toBe(false);
+    expect(
+      await service.repository.getOccurrence(
+        fixture.runtime.agentId,
+        occurrence.id,
+      ),
+    ).toEqual(occurrence);
+  },
+);
+
+it.each(["update", "cancel"] as const)(
+  "does not let the reminders surface %s a todo definition",
+  async (action) => {
+    const todo = await service.createDefinition({
+      title: `Todo definition protected from reminder ${action}`,
+      kind: "task",
+      timezone: "UTC",
+      cadence: { kind: "unscheduled" },
+      metadata: {
+        ownerSurface: "OWNER_TODOS",
+        nativeProjection: "in_app_only",
+      },
+    });
+
+    const result = await invoke(
+      {
+        action,
+        target: todo.definition.id,
+        details: { description: "Unauthorized reminder edit" },
+      },
+      action === "update" ? "Update this reminder." : "Cancel this reminder.",
+    );
+
+    expect(result.success).toBe(false);
+    expect(
+      (await service.getDefinition(todo.definition.id)).definition,
+    ).toEqual(todo.definition);
+  },
+);
+
 it("does not let a non-owner complete a definition-selected reminder", async () => {
   const original = await seed("Owner-only definition-selected completion");
   const [occurrence] = await service.repository.listOccurrencesForDefinition(
