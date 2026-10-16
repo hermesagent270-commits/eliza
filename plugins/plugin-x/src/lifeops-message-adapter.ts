@@ -226,6 +226,11 @@ export class XDmAdapter extends BaseMessageAdapter {
     _runtime: IAgentRuntime,
     draft: DraftRequest,
   ): Promise<{ draftId: string; preview: string }> {
+    if (draft.to.length !== 1) {
+      throw new Error(
+        "[XDmAdapter] createDraft requires exactly one recipient; X group DM creation is not supported",
+      );
+    }
     const recipient = draft.to[0]?.identifier;
     if (!recipient) {
       throw new Error(

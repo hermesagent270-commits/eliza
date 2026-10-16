@@ -43,3 +43,14 @@ describe("XDmAdapter listMessages", () => {
     expect(refs.map((ref) => ref.channelId)).toEqual(["conv-B", "conv-A"]);
   });
 });
+
+describe("XDmAdapter createDraft", () => {
+  it("rejects a multi-recipient draft instead of silently dropping recipients", async () => {
+    await expect(
+      new XDmAdapter().createDraft(runtime, {
+        to: [{ identifier: "alice" }, { identifier: "bob" }],
+        body: "Meet at noon",
+      }),
+    ).rejects.toThrow(/exactly one recipient/i);
+  });
+});
