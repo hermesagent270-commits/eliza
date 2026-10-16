@@ -32,6 +32,7 @@ function discordMemory(overrides: {
 	createdAt?: number;
 	fromBot?: boolean;
 	attachments?: unknown[];
+	accountId?: string;
 }): Memory {
 	return {
 		id: `00000000-0000-0000-0000-${String(
@@ -49,7 +50,7 @@ function discordMemory(overrides: {
 		metadata: {
 			type: "message",
 			source: "discord",
-			accountId: "default",
+			accountId: overrides.accountId ?? "default",
 			entityName: "nubs",
 			entityUserName: "nubscarson",
 			fromBot: overrides.fromBot ?? false,
@@ -275,6 +276,51 @@ describe("DiscordTriageAdapter", () => {
 			limit: 2,
 		});
 		expect(refs.map((r) => r.externalId)).toEqual(["10", "20"]);
+	});
+
+	it("sweeps messages from every configured Discord account", async () => {
+		const service = {
+			...createFakeDiscordService(),
+			getAccountIds: () => ["primary", "secondary"],
+			async listConnectorRooms(
+				context: MessageConnectorQueryContext,
+			): Promise<MessageConnectorTarget[]> {
+				const accountId = context.accountId ?? "primary";
+				return [
+					{
+						target: {
+							source: "discord",
+							accountId,
+							channelId: `${accountId}-channel`,
+						},
+					},
+				];
+			},
+			async fetchConnectorMessages(
+				_context: MessageConnectorQueryContext,
+				params: { channelId?: string; target?: TargetInfo },
+			): Promise<Memory[]> {
+				const accountId = params.target?.accountId ?? "primary";
+				return [
+					discordMemory({
+						messageId: accountId === "primary" ? "100" : "200",
+						channelId: params.channelId ?? "",
+						accountId,
+					}),
+				];
+			},
+		};
+
+		const refs = await new DiscordTriageAdapter().listMessages(
+			createRuntime(service),
+			{},
+		);
+
+		expect(refs.map((ref) => ref.externalId).sort()).toEqual(["100", "200"]);
+		expect(refs.map((ref) => ref.metadata?.accountId).sort()).toEqual([
+			"primary",
+			"secondary",
+		]);
 	});
 
 	it("preserves every discovered channel and message when limit is omitted", async () => {

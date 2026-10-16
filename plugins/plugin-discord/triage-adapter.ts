@@ -74,6 +74,7 @@ function snowflakeBefore(sinceMs: number): string | undefined {
  * stale service shape.
  */
 interface DiscordTriageCapableService {
+	getAccountIds?(): string[];
 	fetchConnectorMessages(
 		context: MessageConnectorQueryContext,
 		params: DiscordConnectorFetchParams,
@@ -132,6 +133,11 @@ interface DiscordDraftContext {
 	/** Discord message id the draft answers; sent as the reply reference. */
 	readonly replyToExternalMessageId?: string;
 	readonly preview: string;
+}
+
+interface DiscordChannelTarget {
+	readonly channelId: string;
+	readonly accountId?: string;
 }
 
 /**
@@ -214,8 +220,12 @@ export class DiscordTriageAdapter extends BaseMessageAdapter {
 				"Discord triage limit must be a positive safe integer",
 			);
 		}
-		const channelIds = await this.resolveChannelIds(runtime, service, opts);
-		if (channelIds.length === 0) return [];
+		const channelTargets = await this.resolveChannelTargets(
+			runtime,
+			service,
+			opts,
+		);
+		if (channelTargets.length === 0) return [];
 
 		// Without a limit the service reads a channel's history until it runs
 		// out, so a sweep bounded only by `sinceMs` would walk every channel
@@ -226,7 +236,12 @@ export class DiscordTriageAdapter extends BaseMessageAdapter {
 				? snowflakeBefore(opts.sinceMs)
 				: undefined;
 		const merged: MessageRef[] = [];
-		for (const channelId of channelIds) {
+		for (const { channelId, accountId } of channelTargets) {
+			const target: TargetInfo = {
+				source: "discord",
+				channelId,
+				...(accountId ? { accountId } : {}),
+			};
 			// The limit counts triage candidates, not raw messages: the agent's
 			// own replies are dropped below, so a window of `limit` raw messages
 			// could hold almost none. Page older until the channel yields `limit`
@@ -242,8 +257,13 @@ export class DiscordTriageAdapter extends BaseMessageAdapter {
 				let memories: Memory[];
 				try {
 					memories = await service.fetchConnectorMessages(
-						{ runtime },
 						{
+							runtime,
+							...(accountId ? { accountId } : {}),
+							target,
+						},
+						{
+							target,
 							channelId,
 							...(pageSize === undefined ? {} : { limit: pageSize }),
 							...(before ? { before } : {}),
@@ -434,29 +454,44 @@ export class DiscordTriageAdapter extends BaseMessageAdapter {
 		return service;
 	}
 
-	private async resolveChannelIds(
+	private async resolveChannelTargets(
 		runtime: IAgentRuntime,
 		service: DiscordTriageCapableService,
 		opts: ListOptions,
-	): Promise<string[]> {
+	): Promise<DiscordChannelTarget[]> {
 		if (opts.channelIds && opts.channelIds.length > 0) {
-			return [...new Set(opts.channelIds)];
+			return [...new Set(opts.channelIds)].map((channelId) => ({ channelId }));
 		}
-		const rooms = await service.listConnectorRooms({ runtime });
+		const configuredAccountIds = service.getAccountIds?.() ?? [];
+		const accountIds =
+			configuredAccountIds.length > 0
+				? [...new Set(configuredAccountIds)]
+				: [undefined];
 		const worlds = opts.worldIds ? new Set(opts.worldIds) : null;
-		const channelIds: string[] = [];
-		for (const room of rooms) {
-			const channelId = room.target.channelId;
-			if (!channelId) continue;
-			if (
-				worlds &&
-				(!room.target.serverId || !worlds.has(room.target.serverId))
-			) {
-				continue;
+		const targets = new Map<string, DiscordChannelTarget>();
+		for (const accountId of accountIds) {
+			const rooms = await service.listConnectorRooms({
+				runtime,
+				...(accountId ? { accountId } : {}),
+			});
+			for (const room of rooms) {
+				const channelId = room.target.channelId;
+				if (!channelId) continue;
+				if (
+					worlds &&
+					(!room.target.serverId || !worlds.has(room.target.serverId))
+				) {
+					continue;
+				}
+				const targetAccountId = room.target.accountId ?? accountId;
+				const key = `${targetAccountId ?? ""}:${channelId}`;
+				targets.set(key, {
+					channelId,
+					...(targetAccountId ? { accountId: targetAccountId } : {}),
+				});
 			}
-			channelIds.push(channelId);
 		}
-		return [...new Set(channelIds)];
+		return [...targets.values()];
 	}
 
 	private resolveDraftChannelId(draft: DraftRequest): string | undefined {
