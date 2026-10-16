@@ -605,7 +605,7 @@ function resolveSnoozeUntil(params: InboxActionParameters): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const parsed = Date.parse(trimmed);
-  if (!Number.isFinite(parsed)) return null;
+  if (!Number.isFinite(parsed) || parsed <= Date.now()) return null;
   return new Date(parsed).toISOString();
 }
 
@@ -954,7 +954,7 @@ export async function executeInboxQueueOperation(args: {
       const id = requireEntryId(args.params);
       const until = resolveSnoozeUntil(args.params);
       if (!until) {
-        throw new Error("valid snooze timestamp is required");
+        throw new Error("valid future snooze timestamp is required");
       }
       await loadEntry(repo, id);
       await repo.snoozeUntil(id, until);

@@ -343,7 +343,7 @@ describe("inbox routes e2e — real plugin on real PGLite runtime", () => {
     ).entries.map((entry) => entry.id);
     expect(snoozedIds).toContain(target.id);
   });
-  it("snooze validates its inputs: unknown entry and bad timestamp both fail loudly", async () => {
+  it("snooze rejects unknown entries and invalid or past timestamps", async () => {
     const missing = await call(
       "POST",
       "/api/lifeops/inbox/00000000-0000-0000-0000-000000000000/snooze",
@@ -380,6 +380,23 @@ describe("inbox routes e2e — real plugin on real PGLite runtime", () => {
         ).error,
       ),
     ).toContain("snooze timestamp");
+
+    const beforePastAttempt = await repo.getById(anyEntry.id);
+    const pastTs = await call(
+      "POST",
+      `/api/lifeops/inbox/${anyEntry.id}/snooze`,
+      {
+        params: { id: anyEntry.id },
+        body: { snoozedUntil: "2000-01-01T00:00:00.000Z" },
+      },
+    );
+    expect(pastTs.status).toBe(400);
+    expect(String((pastTs.body as { error: string }).error)).toContain(
+      "future snooze timestamp",
+    );
+    expect((await repo.getById(anyEntry.id))?.snoozedUntil).toBe(
+      beforePastAttempt?.snoozedUntil,
+    );
   });
   it("POST :id/approve fails cleanly when the entry has no draft or suggested response", async () => {
     const unresolved = await repo.getUnresolved({
