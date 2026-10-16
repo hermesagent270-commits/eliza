@@ -7,6 +7,7 @@
  */
 import {
   type IAgentRuntime,
+  logger,
   type Memory,
   toWellFormedUnicode,
 } from "@elizaos/core";
@@ -21,6 +22,7 @@ import {
 } from "@elizaos/plugin-assistant";
 
 type XRuntimeServiceLike = {
+  getAccountIds?: () => readonly string[] | Promise<readonly string[]>;
   sendDirectMessageForAccount?: (
     accountId: string | undefined,
     params: { participantId: string; text: string },
@@ -158,7 +160,7 @@ export class XDmAdapter extends BaseMessageAdapter {
       search: false,
       manage: {},
       send: { reply: true, new: true, schedule: false },
-      worlds: "single",
+      worlds: "multi",
       channels: "implicit",
     };
   }
@@ -177,19 +179,37 @@ export class XDmAdapter extends BaseMessageAdapter {
     // A conversation-scoped request (`channelIds`) lists only those
     // conversations; this adapter owns that scope (`channels: "implicit"`).
     const channels = opts.channelIds?.length ? new Set(opts.channelIds) : null;
-    // Every requested X account (`worldIds`), or the service's default account.
+    // Every requested X account (`worldIds`), or every connected account when
+    // the service exposes its inventory. Older service facades retain their
+    // single-default behavior.
     const accountIds: Array<string | undefined> = opts.worldIds?.length
       ? [...new Set(opts.worldIds)]
-      : [undefined];
+      : typeof service.getAccountIds === "function"
+        ? [...new Set(await service.getAccountIds())]
+        : [undefined];
     const refs: MessageRef[] = [];
+    const failures: unknown[] = [];
     for (const accountId of accountIds) {
       // The listing includes the account's own sent DMs; the inbox holds only
       // messages from others, like the Discord triage adapter. Fetch the
       // service's full window before filtering, so recent replies do not push
       // older inbound DMs out of the result.
-      const memories = await service.fetchDirectMessagesForAccount(accountId, {
-        participantId: undefined,
-      });
+      let memories: Memory[];
+      try {
+        memories = await service.fetchDirectMessagesForAccount(accountId, {
+          participantId: undefined,
+        });
+      } catch (error) {
+        failures.push(error);
+        runtime.reportError("XDmAdapter.listMessages", error, {
+          accountId: accountId ?? "default",
+        });
+        logger.warn(
+          { src: "plugin:x", accountId: accountId ?? "default" },
+          "X inbox account read failed; continuing with other accounts",
+        );
+        continue;
+      }
       const candidates = memories
         .filter((memory) => memory.entityId !== runtime.agentId)
         .map(memoryToMessageRef)
@@ -203,6 +223,7 @@ export class XDmAdapter extends BaseMessageAdapter {
         );
       refs.push(...candidates);
     }
+    if (refs.length === 0 && failures.length > 0) throw failures[0];
     const newest = refs
       .map((ref, index) => ({ ref, index }))
       .sort(

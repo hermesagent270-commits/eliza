@@ -42,4 +42,62 @@ describe("XDmAdapter listMessages", () => {
     const refs = await new XDmAdapter().listMessages(runtime, {});
     expect(refs.map((ref) => ref.channelId)).toEqual(["conv-B", "conv-A"]);
   });
+
+  it("lists direct messages from every connected account by default", async () => {
+    const calls: Array<string | undefined> = [];
+    const multiAccountService = {
+      getAccountIds: () => ["personal", "work"],
+      fetchDirectMessagesForAccount: async (accountId: string | undefined) => {
+        calls.push(accountId);
+        const message = dm(
+          `event-${accountId}`,
+          `conversation-${accountId}`,
+          `message for ${accountId}`,
+          accountId === "work" ? 2_000 : 1_000,
+        );
+        return [
+          {
+            ...message,
+            metadata: { ...message.metadata, accountId },
+          },
+        ];
+      },
+    };
+    const multiAccountRuntime = {
+      agentId: "agent",
+      getService: (name: string) => (name === "x" ? multiAccountService : null),
+    } as unknown as IAgentRuntime;
+
+    const refs = await new XDmAdapter().listMessages(multiAccountRuntime, {});
+
+    expect(calls).toEqual(["personal", "work"]);
+    expect(refs.map((ref) => ref.worldId)).toEqual(["work", "personal"]);
+  });
+
+  it("keeps messages from a healthy account when another account fails", async () => {
+    const reported: unknown[] = [];
+    const partialService = {
+      getAccountIds: () => ["expired", "work"],
+      fetchDirectMessagesForAccount: async (accountId: string | undefined) => {
+        if (accountId === "expired") throw new Error("token expired");
+        const message = dm("event-work", "conversation-work", "ready", 2_000);
+        return [
+          {
+            ...message,
+            metadata: { ...message.metadata, accountId },
+          },
+        ];
+      },
+    };
+    const partialRuntime = {
+      agentId: "agent",
+      getService: (name: string) => (name === "x" ? partialService : null),
+      reportError: (_source: string, error: unknown) => reported.push(error),
+    } as unknown as IAgentRuntime;
+
+    const refs = await new XDmAdapter().listMessages(partialRuntime, {});
+
+    expect(refs.map((ref) => ref.worldId)).toEqual(["work"]);
+    expect(reported).toHaveLength(1);
+  });
 });

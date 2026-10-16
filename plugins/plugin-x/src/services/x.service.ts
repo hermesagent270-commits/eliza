@@ -17,6 +17,7 @@ import {
   type Content,
   createUniqueUuid,
   ElizaError,
+  getConnectorAccountManager,
   type IAgentRuntime,
   logger,
   type Memory,
@@ -30,6 +31,7 @@ import {
 } from "@elizaos/core";
 import { ClientBase, type TwitterProfile } from "../base";
 import {
+  listConfiguredXAccountIds,
   normalizeXAccountId,
   resolveDefaultXAccountId,
   resolveRequestedXAccountId,
@@ -458,6 +460,37 @@ export class XService extends Service {
       }
     }
     return normalizeXAccountId(this.defaultAccountId);
+  }
+
+  /** Connected X accounts that can participate in an unscoped inbox sweep. */
+  async getAccountIds(): Promise<string[]> {
+    const runtime = this.runtime;
+    if (!runtime) {
+      throw new Error("X service runtime is not initialized.");
+    }
+
+    const accounts =
+      await getConnectorAccountManager(runtime).listAccounts("x");
+    const managedById = new Map(
+      accounts.map((account) => [account.id, account] as const),
+    );
+    const isUsable = (account: (typeof accounts)[number]): boolean =>
+      account.status === "connected" &&
+      account.purpose.includes("messaging") &&
+      (account.accessGate === "open" ||
+        account.accessGate === "owner_binding") &&
+      account.metadata?.disabled !== true &&
+      account.metadata?.enabled !== false;
+    const accountIds = new Set<string>();
+
+    for (const accountId of listConfiguredXAccountIds(runtime)) {
+      const managed = managedById.get(accountId);
+      if (!managed || isUsable(managed)) accountIds.add(accountId);
+    }
+    for (const account of accounts) {
+      if (isUsable(account)) accountIds.add(account.id);
+    }
+    return [...accountIds];
   }
 
   private async getTwitterClientForAccount(

@@ -131,6 +131,16 @@ function parseAccountsJson(
   return accounts;
 }
 
+/** Account ids declared by the X runtime settings, with the default first. */
+export function listConfiguredXAccountIds(runtime: IAgentRuntime): string[] {
+  return [
+    ...new Set([
+      resolveDefaultXAccountId(runtime),
+      ...parseAccountsJson(runtime).keys(),
+    ]),
+  ];
+}
+
 function readRawField(
   record: RawAccountRecord | undefined,
   keys: string[],
