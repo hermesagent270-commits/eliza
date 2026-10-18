@@ -840,6 +840,19 @@ export class FormService extends Service {
       fieldState.confidence = undefined;
     }
 
+    const form = this.getForm(session.formId);
+    if (form) {
+      const allRequiredFilled = this.checkAllRequiredFilled(session, form);
+      if (!allRequiredFilled && session.status === "ready") {
+        session.status = "active";
+      } else if (allRequiredFilled && session.status === "active") {
+        session.status = "ready";
+        if (form.hooks?.onReady) {
+          await this.executeHook(session, "onReady");
+        }
+      }
+    }
+
     fieldState.updatedAt = now;
     session.updatedAt = now;
     await storageSaveSession(this.runtime, session);

@@ -99,7 +99,7 @@ describe("form lifecycle outcomes", () => {
     });
   });
 
-  it("requires confirmation before persisting or submitting an uncertain optional value", async () => {
+  it("requires confirmation before submission and makes a completed required form ready", async () => {
     service.registerForm({
       id: "optional-note",
       name: "Optional note",
@@ -137,6 +137,23 @@ describe("form lifecycle outcomes", () => {
     expect(
       await getSubmissions(runtime, entityId, "optional-note"),
     ).toHaveLength(1);
+
+    const required = await service.startSession("signup", entityId, roomId);
+    await service.updateField(
+      required.id,
+      entityId,
+      "name",
+      "Alice",
+      0.3,
+      "extraction",
+    );
+    expect((await getSessionById(runtime, entityId, required.id))?.status).toBe(
+      "active",
+    );
+    await service.confirmField(required.id, entityId, "name", true);
+    const confirmed = await getSessionById(runtime, entityId, required.id);
+    expect(confirmed?.fields.name.status).toBe("filled");
+    expect(confirmed?.status).toBe("ready");
   });
 
   it("still submits a form when its optional field was omitted", async () => {
