@@ -344,12 +344,26 @@ export async function performUpdate(
     };
   }
 
+  const newVersion = readPostUpdateVersion();
+  if (!newVersion || newVersion === currentVersion) {
+    return {
+      success: false,
+      method,
+      command: commandString,
+      previousVersion: currentVersion,
+      newVersion,
+      error: newVersion
+        ? `Update command completed, but the installed version is still ${currentVersion}.`
+        : "Update command completed, but the installed version could not be verified.",
+    };
+  }
+
   return {
     success: true,
     method,
     command: commandString,
     previousVersion: currentVersion,
-    newVersion: readPostUpdateVersion(),
+    newVersion,
     error: null,
   };
 }
