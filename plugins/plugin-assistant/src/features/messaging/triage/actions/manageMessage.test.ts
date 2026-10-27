@@ -36,12 +36,17 @@ import { manageMessageAction } from "./manageMessage.ts";
 const AGENT_ID = "00000000-0000-0000-0000-000000000001" as const;
 
 class RecordingManageAdapter extends BaseMessageAdapter {
-  readonly source: MessageSource = "gmail";
+  readonly source: MessageSource;
   messages: MessageRef[] = [];
   manageResult: ManageResult = { ok: true };
   managed: Array<{ messageId: string; operation: ManageOperation }> = [];
 
   unsubscribe = true;
+
+  constructor(source: MessageSource = "gmail") {
+    super();
+    this.source = source;
+  }
 
   isAvailable(): boolean {
     return true;
@@ -223,6 +228,29 @@ describe("manageMessageAction", () => {
     expect(delivered).toEqual([
       { text: "Archived that message.", action: "MESSAGE" },
     ]);
+  });
+
+  it("does not send a stored message id to a different source adapter", async () => {
+    const discord = new RecordingManageAdapter("discord");
+    getDefaultTriageService().register(discord);
+
+    const result = await manageMessageAction.handler(
+      createRuntime(),
+      turn,
+      undefined,
+      options({
+        messageId: "direct-1",
+        source: "discord",
+        operation: "archive",
+      }),
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      text: "message direct-1 belongs to gmail, not discord",
+    });
+    expect(adapter.managed).toEqual([]);
+    expect(discord.managed).toEqual([]);
   });
 
   it("selects the newest matching lookup result and forwards the source hint", async () => {

@@ -398,9 +398,10 @@ export class TriageService {
     messageId: string,
     hint?: { source?: MessageSource },
   ): MessageAdapter | undefined {
-    return hint?.source
-      ? this.adapters.get(hint.source)
-      : this.getAdapterForMessage(runtime, messageId);
+    if (!hint?.source) return this.getAdapterForMessage(runtime, messageId);
+    const stored = this.store.getMessage(messageId, runtime.agentId);
+    if (stored && stored.source !== hint.source) return undefined;
+    return this.adapters.get(hint.source);
   }
 
   async manage(
@@ -411,9 +412,15 @@ export class TriageService {
   ): Promise<ManageResult> {
     const adapter = this.getManageAdapter(runtime, messageId, hint);
     if (!adapter) {
+      const stored = hint?.source
+        ? this.store.getMessage(messageId, runtime.agentId)
+        : null;
       return {
         ok: false,
-        reason: `no adapter resolved for message ${messageId}`,
+        reason:
+          stored && hint?.source && stored.source !== hint.source
+            ? `message ${messageId} belongs to ${stored.source}, not ${hint.source}`
+            : `no adapter resolved for message ${messageId}`,
       };
     }
     // Tags live only in the local store; no adapter has a tag operation.
