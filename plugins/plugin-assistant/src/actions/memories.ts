@@ -21,7 +21,7 @@ import {
   MemoryType as CoreMemoryType,
   ElizaError,
   getActionReplyOwner,
-  getRelatedEntityIds,
+  getVerifiedRelatedEntityIds,
   inflectionTermKeys,
   isActiveMemoryEvidence,
   logger,
@@ -1003,7 +1003,7 @@ async function readStableCompleteMemoryTable(
 
 /**
  * Shared read scope for search and delete-by-query. The entity filter is
- * identity-cluster expanded via getRelatedEntityIds — the same expansion the
+ * expanded over verified identities via getVerifiedRelatedEntityIds — the same expansion the
  * FACTS provider applies — so a fact stored under a cluster sibling of the
  * requested entityId is in scope. A strict-equality filter here made the same
  * fact the provider had just surfaced report as "0 stored items".
@@ -1039,7 +1039,7 @@ async function collectCandidates(
 
   if (scope.entityId) {
     const clusterIds = new Set<string>(
-      await getRelatedEntityIds(runtime, scope.entityId),
+      await getVerifiedRelatedEntityIds(runtime, scope.entityId),
     );
     filtered = filtered.filter(
       (c) => c.memory.entityId != null && clusterIds.has(c.memory.entityId),

@@ -28,7 +28,7 @@ import type {
 } from "@elizaos/core";
 import {
   ElizaError,
-  getRelatedEntityIds,
+  getVerifiedRelatedEntityIds,
   type IAgentRuntime,
   isActiveMemoryEvidence,
   logger,
@@ -367,10 +367,20 @@ export class MemoryService extends Service {
     > & { id?: UUID },
   ): Promise<LongTermMemory> {
     if (memory.id) await this.ensureIncrementalExtractionSupported();
-    const entityId = await resolvePrimaryEntityId(
+    // A memory is filed under the cluster primary only when that primary is a
+    // verified identity of the sender. An inferred same-handle match must not
+    // move one person's memory under another person's entity.
+    const verifiedEntityIds = await getVerifiedRelatedEntityIds(
       this.runtime,
       memory.entityId,
     );
+    const primaryEntityId = await resolvePrimaryEntityId(
+      this.runtime,
+      memory.entityId,
+    );
+    const entityId = verifiedEntityIds.includes(primaryEntityId)
+      ? primaryEntityId
+      : memory.entityId;
     const stored = await (
       await this.requireStorage("store long-term memory")
     ).storeLongTermMemory({ ...memory, entityId });
@@ -390,7 +400,10 @@ export class MemoryService extends Service {
     if (limit !== undefined && limit <= 0) return [];
     const storage = await this.getStorage();
     if (!storage) return [];
-    const entityIds = await getRelatedEntityIds(this.runtime, entityId);
+    // Verified identities only (confirmed links or the identity authority).
+    // Inferred same-handle clusters are built from unverified conversation
+    // claims and must not disclose one person's memories to another.
+    const entityIds = await getVerifiedRelatedEntityIds(this.runtime, entityId);
     const memories = (
       await Promise.all(
         entityIds.map((relatedEntityId) =>

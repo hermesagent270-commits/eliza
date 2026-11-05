@@ -28,7 +28,7 @@ import type {
 } from "@elizaos/core";
 import {
   ElizaError,
-  getRelatedEntityIds,
+  getVerifiedRelatedEntityIds,
   isActiveMemoryEvidence,
 } from "@elizaos/core";
 import {
@@ -361,7 +361,7 @@ const factsProvider: Provider = {
         roomId: message.roomId,
         unique: false,
       });
-      const relatedEntityIdsPromise = getRelatedEntityIds(
+      const relatedEntityIdsPromise = getVerifiedRelatedEntityIds(
         runtime,
         message.entityId,
       );

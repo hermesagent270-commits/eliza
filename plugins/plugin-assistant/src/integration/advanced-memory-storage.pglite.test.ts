@@ -24,6 +24,7 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAdvancedMemoryPlugin } from "../features/advanced-memory/index.ts";
+import { RelationshipsService } from "../services/relationships.ts";
 
 type RuntimeMemoryService = {
   storeLongTermMemory: (memory: {
@@ -224,5 +225,66 @@ describe("plugin-sql advanced memory storage", () => {
     expect(viaLinkedIdentity).toHaveLength(1);
     expect(viaLinkedIdentity[0]?.content).toContain("short emails");
     expect(viaLinkedIdentity[0]?.entityId).toBe(entityA);
+  });
+
+  it("does not join memories through an unverified same-handle identity", async () => {
+    const runtime = createRuntime([RelationshipsService]);
+    runtimes.push(runtime);
+
+    const adapter = await createMigratedAdapter(runtime.agentId);
+    runtime.registerDatabaseAdapter(adapter);
+    await runtime.initialize({ skipMigrations: true });
+
+    const alice = uuidv4() as UUID;
+    const bob = uuidv4() as UUID;
+    await createEntities(runtime, [alice, bob]);
+
+    const relationships = (await runtime.getServiceLoadPromise(
+      "relationships",
+    )) as RelationshipsService;
+    const memoryService = (await runtime.getServiceLoadPromise(
+      "memory",
+    )) as unknown as RuntimeMemoryService;
+
+    // Alice stated her handle; the reflection evaluator stores it unverified.
+    await relationships.upsertIdentity(alice, {
+      platform: "github",
+      handle: "alice-dev",
+      verified: false,
+      confidence: 0.9,
+      source: "reflection",
+    });
+    await memoryService.storeLongTermMemory({
+      agentId: runtime.agentId,
+      entityId: alice,
+      category: "semantic",
+      content: "Alice is going through a divorce.",
+      confidence: 0.9,
+      source: "conversation",
+    });
+    // Bob claims the same handle in a conversation. The inferred same-handle
+    // cluster now contains Alice; a verified link does not exist.
+    await relationships.upsertIdentity(bob, {
+      platform: "github",
+      handle: "alice-dev",
+      verified: false,
+      confidence: 0.9,
+      source: "reflection",
+    });
+    const bobStored = await memoryService.storeLongTermMemory({
+      agentId: runtime.agentId,
+      entityId: bob,
+      category: "semantic",
+      content: "Bob likes tea.",
+      confidence: 0.9,
+      source: "conversation",
+    });
+
+    expect({
+      bobReads: (await memoryService.getLongTermMemories(bob)).map(
+        (memory) => memory.content,
+      ),
+      bobStoredUnder: bobStored.entityId === bob ? "bob" : "other",
+    }).toEqual({ bobReads: ["Bob likes tea."], bobStoredUnder: "bob" });
   });
 });
