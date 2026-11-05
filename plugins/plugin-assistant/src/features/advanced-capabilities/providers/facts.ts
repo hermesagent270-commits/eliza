@@ -31,6 +31,7 @@ import {
   getVerifiedRelatedEntityIds,
   isActiveMemoryEvidence,
 } from "@elizaos/core";
+import { roomIsPublicSurface } from "../../documents/document-access.ts";
 import {
   buildFactQueryText,
   scoreFactKeywordRelevance,
@@ -420,7 +421,18 @@ const factsProvider: Provider = {
           }),
         ),
       ]);
-      const entityFacts = entityFactPools.flat();
+      // The rendered facts reach the model's reply in this room. In a public
+      // room only facts learned in that same room may appear; something the
+      // user told the agent in a DM stays out of the group (the documents
+      // surfacing wall and LONG_TERM_MEMORY apply the same rule).
+      const activeRoomIsPublic = roomIsPublicSurface(
+        (await runtime.getRoom(message.roomId))?.type,
+      );
+      const entityFacts = entityFactPools
+        .flat()
+        .filter(
+          (memory) => !activeRoomIsPublic || memory.roomId === message.roomId,
+        );
       const minimizePrivateFacts = shouldMinimizePrivateFactsForTurn(message);
       const dedupedPool = dedupeById([...roomFacts, ...entityFacts]).filter(
         (memory) =>

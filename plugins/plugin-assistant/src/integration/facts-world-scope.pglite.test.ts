@@ -177,4 +177,87 @@ describe("FACTS provider on connector messages that carry a worldId", () => {
       `What's currently happening in this room:\n[current.uncategorized since 2026-10-10 conf=0.60] ${EXTRACTED_FACT}`,
     );
   });
+
+  it("keeps a fact learned in a DM out of a public room's prompt", async () => {
+    vi.useFakeTimers({
+      now: new Date("2026-10-10T12:00:00.000Z"),
+      toFake: ["Date"],
+    });
+    const runtime = createRuntime();
+    runtimes.push(runtime);
+    runtime.registerDatabaseAdapter(
+      await createMigratedAdapter(runtime.agentId),
+    );
+    await runtime.initialize({ skipMigrations: true });
+    const userId = uuidv4() as UUID;
+    const dmRoomId = uuidv4() as UUID;
+    const groupRoomId = uuidv4() as UUID;
+    const worldId = uuidv4() as UUID;
+    await runtime.ensureConnection({
+      entityId: userId,
+      roomId: dmRoomId,
+      worldId,
+      worldName: "Guild",
+      roomName: "dm",
+      userName: "dana",
+      name: "Dana",
+      source: "discord",
+      type: ChannelType.DM,
+      channelId: "dm-channel",
+    });
+    await runtime.ensureConnection({
+      entityId: userId,
+      roomId: groupRoomId,
+      worldId,
+      worldName: "Guild",
+      roomName: "ops",
+      userName: "dana",
+      name: "Dana",
+      source: "discord",
+      type: ChannelType.GROUP,
+      channelId: "ops-channel",
+    });
+    const confided: Memory = {
+      id: uuidv4() as UUID,
+      entityId: userId,
+      agentId: runtime.agentId,
+      roomId: dmRoomId,
+      worldId,
+      content: {
+        text: "I keep the release checklist in the ops channel.",
+        source: "discord",
+        senderName: "Dana",
+      },
+      createdAt: Date.now(),
+    };
+    await runtime.createMemory(confided, "messages");
+    const stage = await runFactsAndRelationshipsStage({
+      runtime,
+      message: confided,
+      state: { values: {}, data: {}, text: "" } as State,
+      extract: { facts: [EXTRACTED_FACT], relationships: [] },
+    });
+    expect(stage.written.facts).toBe(1);
+    const turn = (roomId: UUID): Memory => ({
+      id: uuidv4() as UUID,
+      entityId: userId,
+      agentId: runtime.agentId,
+      roomId,
+      worldId,
+      content: { text: "any news?", source: "discord", senderName: "Dana" },
+      createdAt: Date.now() + 1,
+    });
+    const rendered = async (roomId: UUID) => {
+      const result = await factsProvider.get(runtime, turn(roomId), {
+        values: {},
+        data: {},
+        text: "",
+      } as State);
+      return (result.text ?? "").includes(EXTRACTED_FACT);
+    };
+    expect({
+      dm: await rendered(dmRoomId),
+      group: await rendered(groupRoomId),
+    }).toEqual({ dm: true, group: false });
+  });
 });
