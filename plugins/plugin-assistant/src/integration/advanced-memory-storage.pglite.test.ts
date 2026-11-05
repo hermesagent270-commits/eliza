@@ -6,11 +6,14 @@
  */
 import {
   AgentRuntime,
+  ChannelType,
   type Character,
   type Entity,
   type IAgentRuntime,
+  type Memory,
   type Plugin,
   Service,
+  type State,
   type UUID,
 } from "@elizaos/core";
 import type { DrizzleDatabase } from "@elizaos/plugin-sql";
@@ -24,6 +27,7 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAdvancedMemoryPlugin } from "../features/advanced-memory/index.ts";
+import { longTermMemoryProvider } from "../features/advanced-memory/providers/long-term-memory.ts";
 import { RelationshipsService } from "../services/relationships.ts";
 
 type RuntimeMemoryService = {
@@ -286,5 +290,70 @@ describe("plugin-sql advanced memory storage", () => {
       ),
       bobStoredUnder: bobStored.entityId === bob ? "bob" : "other",
     }).toEqual({ bobReads: ["Bob likes tea."], bobStoredUnder: "bob" });
+  });
+
+  it("renders a fact learned in a DM only in private rooms", async () => {
+    const runtime = createRuntime();
+    runtimes.push(runtime);
+
+    const adapter = await createMigratedAdapter(runtime.agentId);
+    runtime.registerDatabaseAdapter(adapter);
+    await runtime.initialize({ skipMigrations: true });
+
+    const alice = uuidv4() as UUID;
+    const dmRoom = uuidv4() as UUID;
+    const groupRoom = uuidv4() as UUID;
+    const worldId = uuidv4() as UUID;
+    await createEntities(runtime, [alice]);
+    await runtime.createRooms([
+      {
+        id: dmRoom,
+        agentId: runtime.agentId,
+        worldId,
+        source: "test",
+        type: ChannelType.DM,
+      },
+      {
+        id: groupRoom,
+        agentId: runtime.agentId,
+        worldId,
+        source: "discord",
+        type: ChannelType.GROUP,
+      },
+    ]);
+
+    const memoryService = (await runtime.getServiceLoadPromise(
+      "memory",
+    )) as unknown as RuntimeMemoryService;
+    await memoryService.storeLongTermMemory({
+      agentId: runtime.agentId,
+      entityId: alice,
+      category: "semantic",
+      content: "Alice is going through a divorce.",
+      confidence: 0.9,
+      source: "conversation",
+      metadata: { roomId: dmRoom },
+    });
+
+    const rendered = async (roomId: UUID) => {
+      const message = {
+        id: uuidv4() as UUID,
+        entityId: alice,
+        agentId: runtime.agentId,
+        roomId,
+        content: { text: "any news?" },
+      } as Memory;
+      const result = await longTermMemoryProvider.get(runtime, message, {
+        values: {},
+        data: {},
+        text: "",
+      } as State);
+      return (result.text ?? "").includes("divorce");
+    };
+
+    expect({
+      dm: await rendered(dmRoom),
+      group: await rendered(groupRoom),
+    }).toEqual({ dm: true, group: false });
   });
 });

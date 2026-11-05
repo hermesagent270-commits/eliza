@@ -15,6 +15,7 @@ import type {
   State,
 } from "@elizaos/core";
 import { addHeader } from "@elizaos/core";
+import { roomIsPublicSurface } from "../../documents/document-access.ts";
 import {
   formatLongTermMemories,
   type MemoryService,
@@ -57,7 +58,20 @@ export const longTermMemoryProvider: Provider = {
         };
       }
 
-      const memories = await memoryService.getLongTermMemories(entityId);
+      // The rendered facts reach the model's reply in this room. In a public
+      // room only facts learned in that same room may appear; something the
+      // user told the agent in a DM stays out of the group (the documents
+      // surfacing wall applies the same rule).
+      const room = await runtime.getRoom(message.roomId);
+      const activeRoomIsPublic = roomIsPublicSurface(room?.type);
+      const memories = (
+        await memoryService.getLongTermMemories(entityId)
+      ).filter(
+        (memory) =>
+          !activeRoomIsPublic ||
+          (memory.metadata as Record<string, unknown> | undefined)?.roomId ===
+            message.roomId,
+      );
       if (memories.length === 0) {
         logAdvancedMemoryTrajectory({
           runtime,
