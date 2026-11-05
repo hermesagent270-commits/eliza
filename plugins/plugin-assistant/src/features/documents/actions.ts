@@ -33,6 +33,10 @@ import {
 import { extractUrls } from "../../utils/extract-urls.ts";
 import { addDocumentFromFilePath } from "./docs-loader.ts";
 import {
+  canSurfaceDocumentInRoom,
+  roomIsPublicSurface,
+} from "./document-access.ts";
+import {
   type DocumentListResult,
   DocumentService,
   resolveDocumentRequesterRole,
@@ -875,6 +879,7 @@ async function handleSearch(
   service: DocumentService,
   message: Memory,
   params: DocumentActionParameters,
+  activeRoomIsPublic: boolean,
   _callback?: HandlerCallback,
 ): Promise<ActionResult> {
   const query = getQuery(params);
@@ -901,8 +906,13 @@ async function handleSearch(
       : undefined,
     getSearchMode(params.searchMode),
   );
-  const filteredMatches = matches.filter((item) =>
-    storedDocumentMatchesFilters(item, filters),
+  // The surfacing wall (#13974): fragments are pasted into the active room.
+  // An owner-private or user-private item must not leave a DM for a public
+  // room even when the actor may read it; fragments carry the parent scope.
+  const filteredMatches = matches.filter(
+    (item) =>
+      storedDocumentMatchesFilters(item, filters) &&
+      canSurfaceDocumentInRoom(item, activeRoomIsPublic).ok,
   );
   const hasMoreInWindow = limit !== undefined && filteredMatches.length > limit;
   const visible =
@@ -1078,6 +1088,7 @@ async function handleRead(
   service: DocumentService,
   message: Memory,
   params: DocumentActionParameters,
+  activeRoomIsPublic: boolean,
   _callback?: HandlerCallback,
 ): Promise<ActionResult> {
   const documentId = getDocumentId(params, message);
@@ -1088,6 +1099,18 @@ async function handleRead(
       values: { error: "invalid_id" },
       data: { readOnlyOperation: true },
     });
+  }
+  if (activeRoomIsPublic) {
+    const document = await service.getDocumentById(documentId, message);
+    const wall = document
+      ? canSurfaceDocumentInRoom(document, activeRoomIsPublic)
+      : { ok: true as const };
+    if (!wall.ok) {
+      return result(false, wall.reason, "read", {
+        values: { error: "private_in_public_room", scope: wall.scope },
+        data: { readOnlyOperation: true },
+      });
+    }
   }
 
   const unit: DocumentReadUnit =
@@ -1405,6 +1428,7 @@ async function handleList(
   service: DocumentService,
   message: Memory,
   params: DocumentActionParameters,
+  activeRoomIsPublic: boolean,
   _callback?: HandlerCallback,
 ): Promise<ActionResult> {
   const filters = getDocumentFilterParams(params, message);
@@ -1415,12 +1439,20 @@ async function handleList(
       : undefined;
 
   const requestedLimit = getLimit(params.limit);
-  const listResult = await service.listDocumentsDetailed(message, {
+  const listed = await service.listDocumentsDetailed(message, {
     ...(requestedLimit === undefined ? {} : { limit: requestedLimit }),
     offset,
     query,
     ...filters,
   });
+  // Titles and ids of private items stay out of a public room as well.
+  const surfaceable = (item: Memory) =>
+    canSurfaceDocumentInRoom(item, activeRoomIsPublic).ok;
+  const listResult: DocumentListResult = {
+    ...listed,
+    documents: listed.documents.filter(surfaceable),
+    availableDocuments: listed.availableDocuments.filter(surfaceable),
+  };
   const text = formatDocumentListResult(listResult);
   const listData = {
     documents: listResult.documents,
@@ -1933,6 +1965,13 @@ export const documentAction: Action = {
       });
     }
 
+    // Surfacing wall: the result of search/read/list is rendered into the
+    // active room. A public room must not receive owner-private or
+    // user-private items, whoever asks. Same rule as SEARCH_KNOWLEDGE.
+    const activeRoomIsPublic = roomIsPublicSurface(
+      (await runtime.getRoom(message.roomId as UUID))?.type,
+    );
+
     try {
       switch (subaction) {
         case "inspect_pins":
@@ -1947,9 +1986,21 @@ export const documentAction: Action = {
             subaction,
           );
         case "search":
-          return await handleSearch(service, message, params, callback);
+          return await handleSearch(
+            service,
+            message,
+            params,
+            activeRoomIsPublic,
+            callback,
+          );
         case "read":
-          return await handleRead(service, message, params, callback);
+          return await handleRead(
+            service,
+            message,
+            params,
+            activeRoomIsPublic,
+            callback,
+          );
         case "write":
           return await handleWrite(runtime, service, message, params, callback);
         case "edit":
@@ -1957,7 +2008,13 @@ export const documentAction: Action = {
         case "delete":
           return await handleDelete(service, message, params, callback);
         case "list":
-          return await handleList(service, message, params, callback);
+          return await handleList(
+            service,
+            message,
+            params,
+            activeRoomIsPublic,
+            callback,
+          );
         case "import_file":
           return await handleImportFile(
             runtime,
